@@ -1,0 +1,154 @@
+/* ==========================================================================
+   app.css — Tailwind CSS 入口 + flowbite 主题 + 设计令牌 + Haronix 令牌桥
+   TMPLNote
+   ========================================================================== */
+
+@import "tailwindcss";
+@plugin "flowbite/plugin";
+@source "../node_modules/flowbite-svelte";
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* --------------------------------------------------------------------------
+   主色 primary（琥珀黄，强调色 #F6BF33）
+   完整 11 档色阶：50 最浅 → 950 最深，中间档 500 = #F6BF33
+   -------------------------------------------------------------------------- */
+@theme {
+    --color-primary-50: #fff9eb;
+    --color-primary-100: #feedc3;
+    --color-primary-200: #fcde92;
+    --color-primary-300: #facf61;
+    --color-primary-400: #f8c544;
+    --color-primary-500: #f6bf33;
+    --color-primary-600: #edae0c;
+    --color-primary-700: #c48f08;
+    --color-primary-800: #9d7207;
+    --color-primary-900: #7e5c07;
+    --color-primary-950: #483505;
+}
+
+/* --------------------------------------------------------------------------
+   设计令牌（@theme）—— 暴露为 Tailwind 工具类可引用的变量
+   例：bg-canvas / text-fg / border-divider / rounded-card / shadow-card
+   -------------------------------------------------------------------------- */
+@theme {
+    --color-canvas: #f5f5f5;
+    --color-card: #ffffff;
+    --color-divider: #ededed;
+    --color-field: #f1f1f3;
+    --color-row-active: #f0f0f0;
+    --color-fg: #1f2329;
+    --color-fg-muted: #6b7280;
+    --color-fg-subtle: #9ca3af;
+    --color-nav-active-bg: #feedc3;
+    --color-nav-active-fg: #9d7207;
+    --radius-card: 1rem;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 8px rgb(0 0 0 / 0.04);
+}
+
+/* --------------------------------------------------------------------------
+   设计令牌（:root 直接可用）—— 供 var(--canvas) / var(--fg) 等直接引用
+   -------------------------------------------------------------------------- */
+:root {
+    /* 画布与表面 */
+    --canvas: #f5f5f5;
+    --card: #ffffff;
+    --divider: #ededed;
+    --field: #f1f1f3;
+    --row-active: #f0f0f0;
+
+    /* 文字层级 */
+    --fg: #1f2329;
+    --fg-muted: #6b7280;
+    --fg-subtle: #9ca3af;
+
+    /* 导航激活态 */
+    --nav-active-bg: #feedc3;
+    --nav-active-fg: #9d7207;
+
+    /* 卡片复用令牌 */
+    --card-radius: 1rem;
+    --card-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 8px rgb(0 0 0 / 0.04);
+}
+
+/* --------------------------------------------------------------------------
+   Haronix 主题令牌桥（让 <ha-icon color="var(--ha-color-primary)"> 等生效）
+   -------------------------------------------------------------------------- */
+:root {
+    --ha-color-primary: var(--color-primary-600);
+    /* 白底琥珀主色上用深色文字，保证对比度与可读性 */
+    --ha-color-primary-fg: #1f2329;
+    --ha-color-surface: var(--card);
+    --ha-color-border: var(--divider);
+    --ha-color-text: var(--fg);
+    --ha-color-text-muted: var(--fg-muted);
+    --ha-radius-base: 0.5rem;
+    --ha-font-family: inherit;
+}
+
+/* --------------------------------------------------------------------------
+   深色模式：覆盖设计令牌（.dark 类名驱动，作用于 <html> 及子树）
+   同时覆盖 @theme 生成的 --color-*，使工具类同步适配
+   -------------------------------------------------------------------------- */
+.dark {
+    /* 画布与表面 */
+    --canvas: #111827;
+    --card: #1f2937;
+    --divider: #374151;
+    --field: #374151;
+    --row-active: #374151;
+
+    /* 文字层级 */
+    --fg: #f3f4f6;
+    --fg-muted: #9ca3af;
+    --fg-subtle: #6b7280;
+
+    /* 导航激活态 */
+    --nav-active-bg: rgba(246, 191, 51, 0.18);
+    --nav-active-fg: #f6bf33;
+
+    /* 卡片复用令牌（深色下投影略强） */
+    --card-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 1px 8px rgb(0 0 0 / 0.35);
+
+    /* 同步 @theme 工具类变量 */
+    --color-canvas: #111827;
+    --color-card: #1f2937;
+    --color-divider: #374151;
+    --color-field: #374151;
+    --color-row-active: #374151;
+    --color-fg: #f3f4f6;
+    --color-fg-muted: #9ca3af;
+    --color-fg-subtle: #6b7280;
+    --color-nav-active-bg: rgba(246, 191, 51, 0.18);
+    --color-nav-active-fg: #f6bf33;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 1px 8px rgb(0 0 0 / 0.35);
+}
+
+/* --------------------------------------------------------------------------
+   基础层：画布底色与默认文字色
+   -------------------------------------------------------------------------- */
+@layer base {
+    html,
+    body {
+        min-height: 100%;
+        background-color: var(--canvas);
+        color: var(--fg);
+        /* 禁止双指缩放（iOS 不遵守 user-scalable=no，需 CSS 兜底）；保留纵向/横向滚动 */
+        touch-action: pan-x pan-y;
+        /* 禁止视口级垂直 overscroll / 下拉刷新，避免移动端页面闪烁 */
+        overscroll-behavior-y: none;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   可访问性：减少动态效果
+   -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}

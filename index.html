@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+        />
+        <meta name="description" content="基于 Svelte + PWA 的响应式笔记模板（左侧导航栏 + 右侧内容区）" />
+        <meta name="theme-color" content="#F6BF33" />
+        <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+        <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+        <meta name="apple-mobile-web-app-title" content="TMPLNote" />
+        <title>TMPLNote</title>
+        <script>
+            // 首绘前根据 localStorage 镜像应用主题，避免明暗闪烁
+            (function () {
+                try {
+                    var raw = localStorage.getItem('tmplnote:theme');
+                    var saved = raw ? JSON.parse(raw) : null;
+                    var followSystem = saved ? saved.followSystem !== false : true;
+                    var dark = followSystem
+                        ? window.matchMedia('(prefers-color-scheme: dark)').matches
+                        : Boolean(saved && saved.dark);
+                    if (dark) document.documentElement.classList.add('dark');
+                } catch (e) {
+                    /* 忽略：读取失败时退回跟随系统 */
+                }
+            })();
+        </script>
+        <script>
+            // 跨域隔离引导：GitHub Pages 无法自定义响应头，改由 Service Worker 注入 COOP/COEP。
+            // SW 首次接管后当前页面仍未隔离，需要自动刷新一次才会进入跨域隔离（解锁 wllama 多线程）。
+            (function () {
+                if (!('serviceWorker' in navigator)) return;
+                if (window.crossOriginIsolated) {
+                    // 已隔离：清掉一次性标记，便于下次（例如换环境后）能再次触发
+                    try { sessionStorage.removeItem('coi-reloaded'); } catch (e) {}
+                    return;
+                }
+                var reloadOnce = function () {
+                    if (window.crossOriginIsolated) return;
+                    // 只刷新一次，避免在无法隔离的环境（如 iOS Safari）里无限刷新
+                    var done = false;
+                    try { done = sessionStorage.getItem('coi-reloaded') === '1'; } catch (e) {}
+                    if (done) return;
+                    try { sessionStorage.setItem('coi-reloaded', '1'); } catch (e) {}
+                    location.reload();
+                };
+                if (navigator.serviceWorker.controller) {
+                    // 已被 SW 控制但尚未隔离：等 SW ready 后刷新一次
+                    navigator.serviceWorker.ready.then(reloadOnce).catch(function () {});
+                } else {
+                    // 尚未被控制：等待接管（controllerchange）后刷新一次
+                    navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+                }
+            })();
+        </script>
+        <script>
+            // 强制 100%：禁止双指手势缩放、多指触摸缩放、Ctrl + 滚轮缩放
+            ['gesturestart', 'gesturechange', 'gestureend'].forEach((type) => {
+                document.addEventListener(type, (event) => event.preventDefault(), { passive: false });
+            });
+            document.addEventListener(
+                'touchmove',
+                (event) => {
+                    if (event.touches.length > 1) event.preventDefault();
+                },
+                { passive: false }
+            );
+            window.addEventListener(
+                'wheel',
+                (event) => {
+                    if (event.ctrlKey) event.preventDefault();
+                },
+                { passive: false }
+            );
+        </script>
+    </head>
+    <body>
+        <div id="app"></div>
+        <script type="module" src="/src/main.js"></script>
+    </body>
+</html>

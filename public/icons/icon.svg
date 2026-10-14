@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="TMPLNote">
+    <rect x="0" y="0" width="512" height="512" rx="96" fill="#F6BF33" />
+    <rect x="82" y="128" width="348" height="77" rx="10" fill="#ffffff" />
+    <rect x="218" y="128" width="76" height="256" rx="10" fill="#ffffff" />
+</svg>

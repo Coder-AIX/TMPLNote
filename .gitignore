@@ -1,0 +1,6 @@
+.opencode
+.project
+.temp
+
+node_modules
+dist

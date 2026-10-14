@@ -1,0 +1,305 @@
+/* ==========================================================================
+   editor-overrides.css — 富文本编辑器（FluentEditor / Quill snow）覆盖样式
+   注意：必须在 @opentiny/fluent-editor/style.css 之后引入（见 src/main.js）。
+   目标 DOM 契约（由 RichEditor.svelte 产出）：
+
+   <div class="... overflow-hidden px-6">
+     <div class="mx-auto flex min-h-0 w-full max-w-[1060px] flex-1 flex-col">
+       <div class="flex-none" aria-label="编辑器工具栏"> …buttons… </div>   -> .ql-toolbar.ql-snow
+       <div class="h-px w-full flex-none bg-[var(--divider)]"></div>        -> 独立分隔线（非工具栏底边框）
+       <div class="min-h-0 flex-1"> …Quill… </div>                          -> .ql-container.ql-snow
+     </div>
+   </div>
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1) 工具栏容器：单行横向滚动、按钮间距均匀、上下留白舒展
+      · 不加底边框（分隔线由独立 <div> 承载，避免双线）
+      · 触屏滑动使用 -webkit-overflow-scrolling
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+    border: 0;
+    border-radius: 0;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* --------------------------------------------------------------------------
+   2) 按钮：约 28×28、圆角 6px、内容居中、文字色走令牌、悬停/激活反馈
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 28px;
+    padding: 0;
+    line-height: 1;
+    border-radius: 6px;
+    color: var(--fg);
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.ql-toolbar.ql-snow button:hover,
+.ql-toolbar.ql-snow button.ql-active {
+    background-color: var(--canvas);
+    color: var(--fg);
+}
+
+/* --------------------------------------------------------------------------
+   3) 图标：线性图标统一 20×20；仅确保块级显示、不浮动
+      （stroke="currentColor" fill="none" 已由图标本身保证，不在此覆盖描边色）
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow button svg {
+    display: block;
+    float: none;
+    width: 20px;
+    height: 20px;
+}
+
+/* --------------------------------------------------------------------------
+   4) 文字型按钮（header / bold / italic / underline / strike）：排印字形
+      · 保留 <b> <i> <u> <s> 的语义样式，不做清除
+      · ql-header 的角标用 <sub>
+   -------------------------------------------------------------------------- */
+.ql-snow.ql-toolbar button.ql-header,
+.ql-snow.ql-toolbar button.ql-bold,
+.ql-snow.ql-toolbar button.ql-italic,
+.ql-snow.ql-toolbar button.ql-underline,
+.ql-snow.ql-toolbar button.ql-strike {
+    font-size: 17px;
+    font-weight: 500;
+    line-height: 1;
+    min-width: 28px;
+}
+
+.ql-snow.ql-toolbar button.ql-header sub {
+    font-size: 0.7em;
+    vertical-align: sub;
+}
+
+/* --------------------------------------------------------------------------
+   5) 竖直分隔条（span.ql-toolbar-divider）：1px 细线，不伸缩
+      aria-hidden 由组件设置
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow .ql-toolbar-divider {
+    width: 1px;
+    height: 18px;
+    margin: 0 2px;
+    flex: none;
+    background: var(--divider);
+}
+
+/* --------------------------------------------------------------------------
+   6) 工具栏右端删除按钮：与其它按钮同规格，仅悬停改为红色文字
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow button.ql-delete:hover {
+    color: #ef4444;
+}
+
+/* --------------------------------------------------------------------------
+   7) 内容区：容器撑满父级、内部滚动；去掉 Quill 自带左右内边距与边框
+   -------------------------------------------------------------------------- */
+.ql-container.ql-snow {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    border: 0;
+}
+
+.ql-container.ql-snow > .ql-editor {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 0 64px;
+}
+
+/* 占位文本同步去掉左右内边距（Quill 默认 left/right: 15px） */
+.ql-container.ql-snow .ql-editor.ql-blank::before {
+    left: 0;
+    right: 0;
+}
+
+/* --------------------------------------------------------------------------
+   8) 正文排版：统一行高 1.8、元素上下外边距归零；标题字号分级 + 上边距
+   -------------------------------------------------------------------------- */
+.ql-container.ql-snow .ql-editor,
+.ql-container.ql-snow .ql-editor * {
+    line-height: 1.8;
+}
+
+.ql-container.ql-snow .ql-editor * {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+/* 标题：字号分级（28 / 22 / 18），略加上边距保证层级可读（在归零规则之后声明以生效） */
+.ql-container.ql-snow .ql-editor h1 {
+    font-size: 28px;
+    margin-top: 8px;
+}
+
+.ql-container.ql-snow .ql-editor h2 {
+    font-size: 22px;
+    margin-top: 6px;
+}
+
+.ql-container.ql-snow .ql-editor h3 {
+    font-size: 18px;
+    margin-top: 4px;
+}
+
+/* 首个子元素不留上边距，避免内容顶部出现多余空隙 */
+.ql-container.ql-snow .ql-editor > *:first-child {
+    margin-top: 0;
+}
+
+/* 引用块：左侧细线 + 缩进 + 弱化文字色 */
+.ql-container.ql-snow .ql-editor blockquote {
+    border-left: 2px solid var(--divider);
+    padding-left: 12px;
+    color: var(--fg-muted);
+}
+
+/* --------------------------------------------------------------------------
+   9) 列表与任务列表（保留既有有效规则）
+   -------------------------------------------------------------------------- */
+
+/* 9.1 列表整体左侧不缩进，与正文左对齐（不影响 ql-indent 的层级缩进） */
+.ql-container .ql-editor ol,
+.ql-container .ql-editor ul {
+    padding-left: 0;
+}
+
+/* 9.2 无序列表圆点在左侧缩进区（0 ~ 1.5em）内水平居中
+       同时覆盖两套实现：
+       ① 类名机制：li.bullet::before 在流内，用 margin-left:-1.5em 拉回左侧
+       ② Quill 2 机制：li[data-list='bullet'] > .ql-ui::before 为绝对定位，显式 left:0 */
+.ql-container .ql-editor li.bullet::before {
+    width: 1.5em;
+    margin-left: -1.5em;
+    margin-right: 0;
+    text-align: center;
+}
+
+.ql-container .ql-editor li[data-list='bullet'] > .ql-ui {
+    left: 0;
+}
+
+.ql-container .ql-editor li[data-list='bullet'] > .ql-ui:before {
+    width: 1.5em;
+    margin-left: 0;
+    margin-right: 0;
+    text-align: center;
+}
+
+/* 9.3 任务列表勾选框：移回内容区左侧（不再伸入编辑器内边距），并改为圆角 */
+.ql-container .ql-editor li.checked > .ql-ui,
+.ql-container .ql-editor li.unchecked > .ql-ui {
+    left: 0;
+    margin-left: 0;
+    border-radius: 4px;
+}
+
+/* 9.4 勾选框随行高对齐：行高 1.8 时首行中线在 0.9em 处，勾选框 16px 高（半高 8px） */
+.ql-container .ql-editor li.checked > .ql-ui,
+.ql-container .ql-editor li.unchecked > .ql-ui {
+    top: calc(0.9em - 8px);
+    bottom: auto;
+}
+
+/* --------------------------------------------------------------------------
+   10) 移动端工具栏停靠键盘顶端
+       （由 RichEditor 在窄屏且键盘弹出时添加 .ql-mobile-docked）
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow.ql-mobile-docked {
+    z-index: 40;
+    border-top: 1px solid var(--divider);
+    border-bottom: 0;
+    border-radius: 0.5rem 0.5rem 0 0;
+    box-shadow: 0 -2px 8px rgb(0 0 0 / 0.08);
+    background: var(--card);
+}
+
+/* --------------------------------------------------------------------------
+   11) 深色模式：悬停/激活底色改用 --field，停靠阴影加深
+       由 <html>.dark 类名驱动（不再使用系统媒体查询）；选择器加 .dark
+       前缀以提升特异性并作用于深色子树。
+       （分隔线、停靠背景已通过 --divider / --card 令牌自动适配）
+   -------------------------------------------------------------------------- */
+.dark .ql-toolbar.ql-snow button:hover,
+.dark .ql-toolbar.ql-snow button.ql-active {
+    background-color: var(--field);
+    color: var(--fg);
+}
+
+.dark .ql-toolbar.ql-snow.ql-mobile-docked {
+    box-shadow: 0 -2px 8px rgb(0 0 0 / 0.4);
+}
+
+/* --------------------------------------------------------------------------
+   12) 覆盖 FluentEditor 对工具栏图标的强制填充
+       其内置样式给 .ql-toolbar button 内的 svg/path/polygon 强制 fill
+       （常态 #252b3a、悬停 #5e7ce0、禁用 #adb0b8），会把闭合形状图标
+       填成实心深色块。此处以更高优先级复位为 none（描边仍由 svg 的
+       stroke="currentColor" 决定），并在深色模式下保持 currentColor。
+   -------------------------------------------------------------------------- */
+.ql-toolbar.ql-snow button svg,
+.ql-toolbar.ql-snow button svg path,
+.ql-toolbar.ql-snow button svg polygon,
+.ql-toolbar.ql-snow button svg rect,
+.ql-toolbar.ql-snow button svg circle,
+.ql-toolbar.ql-snow button svg line,
+.ql-toolbar.ql-snow button svg polyline,
+.ql-toolbar.ql-snow button svg ellipse {
+    fill: none;
+    stroke: currentColor;
+}
+
+.ql-toolbar.ql-snow button:hover svg,
+.ql-toolbar.ql-snow button:hover svg path,
+.ql-toolbar.ql-snow button:hover svg polygon,
+.ql-toolbar.ql-snow button:hover svg rect,
+.ql-toolbar.ql-snow button:hover svg circle,
+.ql-toolbar.ql-snow button:hover svg line,
+.ql-toolbar.ql-snow button:hover svg polyline,
+.ql-toolbar.ql-snow button:hover svg ellipse,
+.ql-toolbar.ql-snow button.ql-active svg,
+.ql-toolbar.ql-snow button.ql-active svg path,
+.ql-toolbar.ql-snow button.ql-active svg polygon,
+.ql-toolbar.ql-snow button.ql-active svg rect,
+.ql-toolbar.ql-snow button.ql-active svg circle,
+.ql-toolbar.ql-snow button.ql-active svg line,
+.ql-toolbar.ql-snow button.ql-active svg polyline,
+.ql-toolbar.ql-snow button.ql-active svg ellipse {
+    fill: none;
+    stroke: currentColor;
+}
+
+/* --------------------------------------------------------------------------
+   13) 移动端隐藏编辑器工具栏与分隔线
+       移动端不使用常驻顶端的格式化工具栏（NoteEditor 另行提供「返回」栏）；
+       桌面端（≥ 1024px）保持原样。
+       注意：本规则须声明在基础 `.ql-toolbar.ql-snow` 规则之后；选择器
+       `.ql-toolbar.ql-snow:not(.ql-mobile-docked)`（3 个类）特异性高于基础
+       `.ql-toolbar.ql-snow`（2 个类），可正常覆盖 display。键盘弹起停靠态
+       （.ql-mobile-docked）不匹配 :not()，故仍由第 1 节基础规则与第 10 节
+       停靠样式共同显示于键盘正上方。
+   -------------------------------------------------------------------------- */
+@media (max-width: 1023.98px) {
+    /* 仅隐藏常驻在顶端的工具栏；键盘弹起停靠态（.ql-mobile-docked）仍需显示 */
+    .ql-toolbar.ql-snow:not(.ql-mobile-docked) {
+        display: none;
+    }
+
+    .rte-divider {
+        display: none;
+    }
+}
