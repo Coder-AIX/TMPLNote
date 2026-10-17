@@ -21,9 +21,11 @@
  *
  * ── 性能模式与自动降级 ──
  * high（GPU 全层）在缺少 WebGPU / 显存不足 / 移动端驱动异常时会载入失败，因此载入按模式自动降级：
- *   high     → high → balanced → low
- *   balanced → balanced → low
- *   low      → low
+ *   high     → high → balanced → low → compat
+ *   balanced → balanced → low → compat
+ *   low      → low → compat
+ * compat 为极低内存回退（单线程、上下文最多 2048、最小批/微批、关闭预热），只作内部兜底。
+ * iOS 上 low 模式强制单线程，避免 shared WebAssembly.Memory 分配失败。
  * 每次尝试使用全新的 Wllama 实例，失败实例立即 exit()，避免残留 Worker / wasm 内存。
  * 实际生效的模式通过 `perfMode` getter 暴露（未载入为 null）。
  * 移动端（无 WebGPU 或未跨域隔离）建议直接使用 balanced / low 的 CPU 兼容模式。
@@ -33,6 +35,16 @@ import wllamaWasmUrl from '@wllama/wllama/esm/wasm/wllama.wasm?url';
 
 /** wllama 资源路径：键名必须为 "default"（AssetsPathConfig 约定） */
 const CONFIG_PATHS = { default: wllamaWasmUrl };
+
+/** 是否 iOS / iPadOS（iPadOS 13+ 可能伪装成 Macintosh） */
+function isIOSDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    return (
+        /iPhone|iPad|iPod/i.test(ua) ||
+        (/Macintosh/i.test(ua) && Number(navigator.maxTouchPoints) > 1)
+    );
+}
 
 export class AiEngine {
     constructor() {
@@ -70,13 +82,15 @@ export class AiEngine {
         // 请求模式非法时回退 high（与旧实现“非 low/balanced 即 GPU”保持一致）
         const requested =
             perfMode === 'high' || perfMode === 'balanced' || perfMode === 'low' ? perfMode : 'high';
-        // 降级顺序：GPU 失败会自动回退到 CPU 兼容模式
+        // 降级顺序：GPU 失败会自动回退到 CPU 兼容模式，最终回退到 compat 极低内存模式
         const attempts =
             requested === 'high'
-                ? ['high', 'balanced', 'low']
+                ? ['high', 'balanced', 'low', 'compat']
                 : requested === 'balanced'
-                  ? ['balanced', 'low']
-                  : ['low'];
+                  ? ['balanced', 'low', 'compat']
+                  : requested === 'low'
+                    ? ['low', 'compat']
+                    : ['compat'];
 
         // 与模式无关：关闭思考链（避免思考占满预算导致空回复/长时间满载）
         const base = {
@@ -97,6 +111,9 @@ export class AiEngine {
             n_batch: 512,
             // 微批（ubatch）大小：实际计算粒度，128 可在移动端进一步压低峰值内存，避免大批次爆内存。
             n_ubatch: 128,
+            // 并行序列数：应用一次只处理一个对话，wllama 默认的 4 会预分配多份 KV/计算缓冲，
+            // 设为 1 可显著降低内存占用（移动端尤其重要）。
+            n_parallel: 1,
         };
         const cores =
             (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
@@ -104,13 +121,28 @@ export class AiEngine {
         const ctx = Number.isFinite(contextLength) && contextLength > 0 ? Math.floor(contextLength) : 4096;
         /** 按模式构造 loadModel 配置 */
         const buildConfig = (mode) => {
+            if (mode === 'compat') {
+                // 极低内存回退：单线程 + 最小批/微批 + 关闭预热，并压低上下文，优先保证能载入
+                return {
+                    ...base,
+                    n_gpu_layers: 0,
+                    n_ctx: Math.min(ctx, 2048),
+                    n_threads: 1,
+                    n_parallel: 1,
+                    n_batch: 32,
+                    n_ubatch: 16,
+                    warmup: false,
+                };
+            }
             if (mode === 'low') {
-                // 低功耗：CPU 推理（GPU 让给系统 UI）、限制线程数；上下文不再被性能模式压低
+                // 低功耗：CPU 推理（GPU 让给系统 UI）、限制线程数；上下文不再被性能模式压低。
+                // iOS 上强制单线程：多线程会尝试分配 shared WebAssembly.Memory，iOS 可能直接拒绝
+                // （表现为 cannot allocate WebAssembly memory）。
                 return {
                     ...base,
                     n_gpu_layers: 0,
                     n_ctx: ctx,
-                    n_threads: Math.max(1, Math.floor(cores / 2)),
+                    n_threads: isIOSDevice() ? 1 : Math.max(1, Math.floor(cores / 2)),
                     // 保守分批：更小的批/微批 + 关闭预热，尽量压低移动端峰值内存与载入耗时
                     n_batch: 128,
                     n_ubatch: 64,
@@ -175,7 +207,13 @@ export class AiEngine {
 
         // 全部模式失败：拼接错误信息（先算 detail，避免 ?. 与 + 的优先级陷阱）
         const detail = lastError?.message || String(lastError);
-        throw new Error('模型载入失败（已尝试 ' + tried.join('/') + '）：' + detail);
+        throw new Error(
+            '模型载入失败（已尝试 ' +
+                tried.join('/') +
+                '）：' +
+                detail +
+                '。如果仍失败，可能是设备内存不足，请尝试更小的模型或降低上下文。'
+        );
     }
 
     /**
@@ -241,7 +279,7 @@ export class AiEngine {
         return Boolean(this._wllama);
     }
 
-    /** 实际生效的性能模式：'high'|'balanced'|'low'；未载入为 null */
+    /** 实际生效的性能模式：'high'|'balanced'|'low'|'compat'；未载入为 null */
     get perfMode() {
         return this._perfMode;
     }

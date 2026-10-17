@@ -43,7 +43,7 @@
     /** 性能模式说明 */
     const perfModeHint = $derived(
         perfMode === 'low'
-            ? 'CPU 推理并限制线程数（上下文仍按设置值）；最流畅但最慢。'
+            ? 'CPU 推理并限制线程数；iOS 上强制单线程，避免共享内存分配失败。最流畅但最慢。'
             : perfMode === 'balanced'
               ? 'CPU 推理，占用较多 CPU 核心；不占用 GPU，速度尚可、更少卡顿。'
               : 'GPU 全部层加速，速度最快；设备可能发热或卡顿。移动端若出现卡顿或载入失败，建议改用“均衡”或“低功耗”。'
@@ -422,7 +422,9 @@
                           ? 'CPU（balanced）'
                           : diagnostics.perfMode === 'low'
                             ? 'CPU（low）'
-                            : '—'}
+                            : diagnostics.perfMode === 'compat'
+                              ? 'CPU（compat / 极低内存）'
+                              : '—'}
                 </span>
             </div>
 
@@ -462,6 +464,18 @@
                 </span>
                 <P size="sm" class="text-[var(--fg-muted)]">
                     未开启跨域隔离，将使用单线程兼容模式，速度较慢；不影响基本对话。
+                </P>
+            </div>
+        {/if}
+
+        <!-- 已启用 compat 极低内存模式时的提示（中性/amber，不影响基本对话） -->
+        {#if diagnostics.perfMode === 'compat'}
+            <div class="flex items-start gap-2" role="status">
+                <span class="mt-0.5 flex-none text-amber-600">
+                    <ha-icon name="info" collection="lucide" size="16"></ha-icon>
+                </span>
+                <P size="sm" class="text-[var(--fg-muted)]">
+                    已启用极低内存模式（上下文最多 2048），优先保证能载入。
                 </P>
             </div>
         {/if}
