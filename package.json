@@ -13,6 +13,7 @@
         "@ai-sdk/openai-compatible": "^3.0.68",
         "@opentiny/fluent-editor": "^3.25.12",
         "@wllama/wllama": "^3.8.1",
+        "@wllama/wllama-compat": "^3.8.1",
         "ai": "^7.0.140",
         "docx": "^9.10.0",
         "fflate": "^0.8.3",

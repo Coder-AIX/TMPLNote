@@ -11,9 +11,11 @@
  * 2. wasm 文件位于 `@wllama/wllama/esm/wasm/wllama.wasm`（约 8.4 MiB），用 Vite 的 ?url 引用，
  *    并放入 AssetsPathConfig，键名必须为 "default"（见 wllama.d.ts 的 AssetsPathConfig）。
  * 3. worker 无需配置：wllama 内部以 Blob 内联创建 worker，不需要 `new Worker(new URL(...))` 或 ?url。
- * 4. 离线优先：构造后调用 `wllama.setCompat(null)`，避免走 jsDelivr CDN 的 compat 资源
- *    （见 wllama.d.ts 的 setCompat 注释：compat 默认指向 CDN，需联网；Safari/Firefox 兼容模式才需要）。
- *    本项目以单线程 WebGPU 为主，不启用 compat，保证纯离线可用。
+ * 4. 离线优先 + 浏览器分流：Safari（含 iOS）不支持 non-compat 构建所需的 JSPI / MEMORY64，
+ *    Firefox 亦走 compat 更稳妥，因此这些浏览器调用 `setCompat(WLLAMA_COMPAT_CONFIG)`，
+ *    使用本地打包的 compat wasm（约 16 MiB）与 worker 源码，不依赖 jsDelivr CDN；
+ *    Chromium 继续 `setCompat(null)` 走 non-compat 构建以保持性能。
+ *    两条路径的所有资源均由 Vite 本地打包，保证纯离线可用。
  * 5. 持久化：wllama 自带 CacheManager / ModelManager（默认 OPFS 后端），但仅在
  *    `loadModelFromUrl` / `downloadModel` / `getModelOrDownload` 路径写缓存。
  *    本文件走 `loadModel(Blob[])`（见 wllama.d.ts 第 313 行签名），源码确认该路径不接触
@@ -32,9 +34,17 @@
  */
 import { Wllama } from '@wllama/wllama/esm/index.js';
 import wllamaWasmUrl from '@wllama/wllama/esm/wasm/wllama.wasm?url';
+import compatWasmUrl from '@wllama/wllama-compat/wasm/wllama.wasm?url';
+import compatWorkerCode from '@wllama/wllama-compat/wasm/wllama.js?raw';
 
 /** wllama 资源路径：键名必须为 "default"（AssetsPathConfig 约定） */
 const CONFIG_PATHS = { default: wllamaWasmUrl };
+
+/** Safari/Firefox 兼容构建（本地资源，不依赖 CDN） */
+const WLLAMA_COMPAT_CONFIG = {
+    wasm: compatWasmUrl,
+    worker: { code: compatWorkerCode },
+};
 
 /** 是否 iOS / iPadOS（iPadOS 13+ 可能伪装成 Macintosh） */
 function isIOSDevice() {
@@ -44,6 +54,21 @@ function isIOSDevice() {
         /iPhone|iPad|iPod/i.test(ua) ||
         (/Macintosh/i.test(ua) && Number(navigator.maxTouchPoints) > 1)
     );
+}
+
+/** 是否 macOS Safari（排除 Chromium / Firefox） */
+function isSafariDevice() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    return /Safari/i.test(ua) && !/Chrome|CriOS|Edg|OPR|Firefox|FxiOS/i.test(ua);
+}
+
+/** 是否需要 wllama compat 构建 */
+function needsWllamaCompat() {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const firefox = /Firefox|FxiOS/i.test(ua);
+    return isIOSDevice() || isSafariDevice() || firefox;
 }
 
 export class AiEngine {
@@ -177,8 +202,13 @@ export class AiEngine {
             tried.push(mode);
             // 每次尝试都必须新建实例：失败实例的内部状态不可复用
             const wllama = new Wllama(CONFIG_PATHS);
-            // 关闭 compat（否则会走 CDN），保证离线可用；见文件顶部结论 4
-            wllama.setCompat(null);
+            // Safari / iOS / Firefox 使用本地 compat 构建（non-compat 在这些浏览器上可能直接失败）；
+            // Chromium 继续使用非 compat 构建以保持性能。
+            if (needsWllamaCompat()) {
+                wllama.setCompat(WLLAMA_COMPAT_CONFIG);
+            } else {
+                wllama.setCompat(null);
+            }
             const config = buildConfig(mode);
 
             try {

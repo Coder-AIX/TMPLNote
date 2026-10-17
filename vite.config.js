@@ -72,8 +72,11 @@ export default defineConfig({
             injectManifest: {
                 // 预缓存 wasm（推理引擎离线可用）；模型 GGUF 文件不入预缓存，由业务代码写入 Cache Storage 'ai-models'
                 globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest,wasm}'],
-                // 允许预缓存大文件（wllama.wasm 约 8.7MB，默认上限仅 2MiB）
-                maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
+                // 允许预缓存大文件（默认上限仅 2MiB）：
+                // - wllama.wasm 约 8.7MB（常规推理引擎）
+                // - Safari/iOS 兼容构建的 compat wasm 约 16MB，需一并缓存以保障离线能力
+                // 因此上限设为 20MiB，需大于最大的 compat wasm。
+                maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
                 // 说明：cleanupOutdatedCaches / navigateFallback / runtimeCaching 已移除，
                 // 改由 src/service-worker.js 使用 workbox API 实现。
             },
