@@ -28,13 +28,17 @@
  * - downloaded     {string[]}  A1：已缓存模型的 id 列表（由设置 aiDownloadedModelIds 同步）
  * - customModels   {object[]}  自定义导入的模型描述符数组（同步自 settings.aiCustomModels）
  * - sessionModelId {?string}   A2：本次会话已导入的模型 id；无则为 null
- * - disabled       {boolean}   移动端硬件门槛不满足时为 true，表示已关闭 AI
- * - disabledReason {string}    关闭 AI 的原因文案；空串表示未关闭
+ * - disabled       {boolean}   仅在真正不可用时为 true（如浏览器不支持 WebAssembly）
+ * - disabledReason {string}    真正不可用的原因文案；空串表示可用
+ * - singleThread   {boolean}   当前载入的模型是否运行在单线程兼容模式
+ * - perfMode       {string}    实际生效的性能模式（'high'|'balanced'|'low'）；未载入为空串
+ * - perfWarning    {string}    兼容模式提示（单线程 / 未隔离 / 线程数少）；空串表示无
  *
- * 移动端硬件门槛（仅对移动端生效，PC 不做限制）：
- * - 要求「已开启跨域隔离」（crossOriginIsolated，可启用多线程）且 CPU 核心数 >= MIN_THREADS；
- * - 不满足（未跨域隔离 / 核心数不足）时，初始化即关闭 AI 并给出 disabledReason；
- * - 此外在 loadModel 载入成功后二次校验实测推理线程数，移动端低于门槛时卸载模型并关闭 AI。
+ * 兼容性策略：
+ * - disabled / disabledReason 只在真正不可用（如无 WebAssembly）时使用；
+ * - 移动端未跨域隔离 / CPU 核心数少 / 无 WebGPU 不再关闭 AI，改为 CPU 单线程兼容模式，
+ *   通过 singleThread / perfMode / perfWarning 表达运行态；速度较慢但可用；
+ * - PC 高性能路径不变，MIN_THREADS 仅用于提示。
  *
  * 状态机（state）取值：
  * - 'idle'        空闲：未载入任何模型
@@ -68,28 +72,32 @@ import {
 export const MIN_THREADS = 6;
 
 /**
- * 计算硬件能力门槛（仅对移动端生效，PC 不做限制）。
- * 触发关闭：未跨域隔离（无法多线程）或 CPU 核心数 < MIN_THREADS。
- * @returns {{disabled: boolean, reason: string}}
+ * 计算硬件能力门槛。
+ * 仅在真正不可用（无 WebAssembly）时关闭 AI；移动端未跨域隔离 / 核心数少
+ * 只产生兼容模式提示（warnings），不再关闭 AI。
+ * @returns {{disabled: boolean, reason: string, warnings: string[]}}
  */
 function computeCapability() {
+    const warnings = [];
+    // 真正不可用：没有 WebAssembly
+    if (typeof WebAssembly === 'undefined') {
+        return {
+            disabled: true,
+            reason: '当前浏览器不支持 WebAssembly，无法运行本地模型。',
+            warnings: []
+        };
+    }
     // PC 不做限制
-    if (!isMobileDevice()) return { disabled: false, reason: '' };
+    if (!isMobileDevice()) return { disabled: false, reason: '', warnings };
     const isolated = typeof crossOriginIsolated === 'boolean' ? crossOriginIsolated : false;
     if (!isolated) {
-        return {
-            disabled: true,
-            reason: '当前环境未开启跨域隔离，无法启用多线程，移动端推理会非常慢，已关闭 AI。'
-        };
+        warnings.push('未开启跨域隔离，将使用单线程兼容模式，速度较慢。');
     }
     const cores = Number((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 0);
-    if (cores < MIN_THREADS) {
-        return {
-            disabled: true,
-            reason: `CPU 核心数不足（${cores} < ${MIN_THREADS}），无法流畅运行本地模型，已关闭 AI。`
-        };
+    if (cores > 0 && cores < MIN_THREADS) {
+        warnings.push(`CPU 核心数较少（${cores}），推理速度可能较慢。`);
     }
-    return { disabled: false, reason: '' };
+    return { disabled: false, reason: '', warnings };
 }
 
 /** 模块初始化时计算一次的硬件门槛结果（供 store 初始值使用，避免重复调用） */
@@ -102,8 +110,11 @@ export const ai = writable({
     modelLabel: getModel(DEFAULT_MODEL_ID)?.label ?? '', // 当前模型展示名（推荐 / 自定义通吃）
     progress: null, // { percent, file } | null
     error: '', // 错误信息
-    disabled: initialCapability.disabled, // 移动端硬件门槛不满足时为 true（关闭 AI）
-    disabledReason: initialCapability.reason, // 关闭 AI 的原因文案；空串表示未关闭
+    disabled: initialCapability.disabled, // 仅在真正不可用时为 true（如无 WebAssembly）
+    disabledReason: initialCapability.reason, // 真正不可用的原因文案；空串表示可用
+    singleThread: false, // 当前模型是否运行在单线程兼容模式
+    perfMode: '', // 实际生效的性能模式（high/balanced/low）；未载入为空串
+    perfWarning: initialCapability.warnings.join(' '), // 兼容模式提示；空串表示无
     downloaded: [], // A1：已缓存模型 id 列表
     customModels: [], // 自定义导入的模型描述符数组（同步自 settings.aiCustomModels）
     sessionModelId: null // A2：本次会话已导入的模型 id
@@ -241,7 +252,7 @@ export async function importCustomModel(file) {
  * @param {string} id 模型 id（推荐模型或自定义模型均可）
  */
 export async function loadModel(id) {
-    // 移动端硬件门槛不满足（未跨域隔离 / 线程不足）时，直接拦截并提示
+    // 仅在真正不可用（如无 WebAssembly）时拦截；兼容模式不阻止载入
     if (get(ai).disabled) {
         ai.update((a) => ({ ...a, state: 'error', error: get(ai).disabledReason }));
         return;
@@ -270,7 +281,11 @@ export async function loadModel(id) {
         ...a,
         state: 'loading',
         error: '',
-        progress: { percent: 0, file: model.file }
+        progress: { percent: 0, file: model.file },
+        // 重置兼容模式运行态，避免上一次载入的提示残留
+        singleThread: false,
+        perfMode: '',
+        perfWarning: ''
     }));
 
     try {
@@ -285,24 +300,31 @@ export async function loadModel(id) {
                 }))
         });
 
-        await updateSetting('aiModelId', id);
-        ai.update((a) => ({ ...a, modelId: id, state: 'ready', progress: null }));
-
-        // 载入后实测线程数：移动端低于门槛则关闭 AI 并卸载，避免不可用状态
-        const caps = computeCapability();
+        // 载入成功：记录实际运行的性能模式与线程模式（不在移动端因线程少而卸载模型）
         const threads = aiEngine.threads;
-        if (!caps.disabled && isMobileDevice() && threads > 0 && threads < MIN_THREADS) {
-            await aiEngine.unload();
-            ai.update((a) => ({
-                ...a,
-                state: 'idle',
-                progress: null,
-                modelId: null,
-                disabled: true,
-                disabledReason: `实际推理线程数不足（${threads} < ${MIN_THREADS}），已关闭 AI。`
-            }));
-            return;
+        const perfMode = aiEngine.perfMode || '';
+        const singleThread = threads <= 1;
+        const warnings = [];
+        const mobile = isMobileDevice();
+        const isolated =
+            typeof crossOriginIsolated === 'boolean' ? crossOriginIsolated : false;
+
+        if (singleThread) warnings.push('当前为单线程兼容模式，推理速度较慢。');
+        if (mobile && !isolated) warnings.push('未开启跨域隔离，移动端可能非常慢。');
+        if (mobile && threads > 0 && threads < MIN_THREADS) {
+            warnings.push(`推理线程数较少（${threads}），速度可能较慢。`);
         }
+
+        await updateSetting('aiModelId', id);
+        ai.update((a) => ({
+            ...a,
+            modelId: id,
+            state: 'ready',
+            progress: null,
+            singleThread,
+            perfMode,
+            perfWarning: warnings.join(' ')
+        }));
     } catch (e) {
         ai.update((a) => ({
             ...a,
@@ -360,7 +382,10 @@ export async function unloadModel() {
     ai.update((a) => ({
         ...a,
         state: available ? 'downloaded' : 'idle',
-        progress: null
+        progress: null,
+        singleThread: false,
+        perfMode: '',
+        perfWarning: ''
     }));
 }
 
@@ -409,7 +434,9 @@ export async function deleteModel(id) {
         // 删除的是当前载入 / 选中模型时回落 idle，否则保持原状态
         state: isCurrent ? 'idle' : a.state,
         progress: null,
-        error: ''
+        error: '',
+        // 删除并卸载当前模型时清空兼容模式运行态；删除其它模型不影响当前运行态
+        ...(isCurrent ? { singleThread: false, perfMode: '', perfWarning: '' } : {})
     }));
 }
 
@@ -446,6 +473,9 @@ export async function clearCache() {
         state: 'idle',
         progress: null,
         error: '',
+        singleThread: false,
+        perfMode: '',
+        perfWarning: '',
         downloaded: [],
         modelId: DEFAULT_MODEL_ID,
         customModels: [],

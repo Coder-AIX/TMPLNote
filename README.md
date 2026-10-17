@@ -13,7 +13,7 @@
 
 版本 `v0.1.0`
 
-在线体验：**<https://coder-aix.github.io/TMPLNote/>**
+在线体验：部署到 Cloudflare Pages 后访问分配的 `*.pages.dev` 域名（或自定义域名）。
 
 </div>
 
@@ -33,7 +33,7 @@
 - [功能特性](#功能特性)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
-- [部署到 GitHub Pages](#部署到-github-pages)
+- [部署到 Cloudflare Pages](#部署到-cloudflare-pages)
 - [AI 模型获取与使用](#ai-模型获取与使用)
 - [数据与隐私](#数据与隐私)
 - [目录结构](#目录结构)
@@ -56,12 +56,14 @@ TMPLNote 是一个渐进式 Web 应用（PWA）。所有核心数据都存放在
 
 TMPLNote 内置本地 AI 对话能力，模型在你的设备上运行，推理过程与对话内容都不离开本机。
 
-- **本地推理**：基于 `@wllama/wllama`，通过 **WebGPU** 加载 **GGUF** 格式的本地小模型进行离线推理。
+- **本地推理**：基于 `@wllama/wllama`，加载 **GGUF** 格式的本地小模型进行离线推理；优先使用 **WebGPU**，不可用时自动回退到 CPU。
+- **移动端兼容模式**：当设备不支持 WebGPU、未开启跨域隔离或可用线程较少时，自动使用 CPU 兼容模式（未开启跨域隔离时通常为单线程）；速度较慢，但可完成基本对话。Safari / iOS 会尝试使用 require-corp 进入跨域隔离以启用多线程；若浏览器版本或跨域资源限制导致失败，则回退到 CPU 单线程兼容模式。
+- **自动降级**：性能优先（GPU）载入失败时，会依次尝试均衡、低功耗的 CPU 模式，避免直接载入失败。
 - **隐私**：对话历史保存在独立的本地数据库，内容不发送到任何服务器。
 - **Agent 工具调用**：AI 智能体可读取本地笔记、新建本地笔记。
 - **写操作授权**：所有写操作（如新建笔记）都会强制弹出授权确认；拒绝后不会执行。
 - **上下文长度可调**：4096 – 51200。
-- **性能模式**：GPU 全层加速 / CPU 全速 / CPU 半速。
+- **性能模式**：性能优先（GPU 全层加速）/ 均衡 / 低功耗（CPU 推理），切换后需重新载入模型生效。
 - **模型存储方式可选**：缓存到浏览器，或仅在本次会话中使用。
 - **灵活导入**：支持导入任意本地 GGUF 模型文件，同一时刻仅载入一个模型。
 - **推荐模型**：来自 Hugging Face 镜像 `hf-mirror.com`，仓库为 `unsloth/Qwen3.5-0.8B-GGUF`（PC 推荐 Q8_0，移动端推荐 Q4_0）。
@@ -90,6 +92,13 @@ TMPLNote 内置本地 AI 对话能力，模型在你的设备上运行，推理�
 ### 本地 AI 对话
 
 见上文[本地 AI](#本地-ai)章节。
+
+| 能力 | 说明 |
+| --- | --- |
+| 本地推理 | 优先 WebGPU，不可用时自动回退 CPU |
+| 移动端兼容模式 | CPU 兼容（未隔离时通常为单线程），较慢但可用 |
+| Agent 工具调用 | 读取本地笔记、新建本地笔记 |
+| 写操作授权 | 新建笔记等写操作均需确认 |
 
 ### 数据导入导出
 
@@ -154,15 +163,63 @@ npm run icons
 
 > 开发与预览服务器已配置跨域隔离响应头（COOP / COEP），以解锁本地推理的多线程能力。
 
-## 部署到 GitHub Pages
+## 部署到 Cloudflare Pages
 
-本项目已适配 GitHub Pages **项目子路径**（构建 `base` 为 `/TMPLNote/`），并通过 GitHub Actions 自动构建部署。
+推荐使用 Cloudflare Pages 部署本项目。它是静态托管服务，但支持通过 `_headers` 文件自定义响应头，因此可以直接向访问者下发跨域隔离所需的 COOP / COEP。
 
-### 在线访问
+### 构建配置
 
-<https://coder-aix.github.io/TMPLNote/>
+在 Cloudflare Pages 中连接 Git 仓库后，使用以下构建设置：
 
-### 自动部署（推荐）
+| 配置项 | 值 |
+| --- | --- |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+| Node.js version | `20` |
+
+环境变量：无需手动设置。Cloudflare 构建时会自动提供 `CF_PAGES=1`，`vite.config.js` 据此使用根路径 `base: '/'`，应用直接部署在域名根路径下。
+
+> 如果本地使用 `wrangler pages deploy dist` 手动上传，请先执行 `CF_PAGES=1 npm run build`，否则构建会按 GitHub Pages 子路径 `/TMPLNote/` 生成。
+
+### 跨域隔离响应头
+
+`public/_headers` 会在构建时被复制到 `dist/_headers`，Cloudflare Pages 会按其中的规则下发：
+
+```http
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+`require-corp` 要求页面加载的跨域资源提供 CORP 或 CORS 响应头。为避免图标被拦截，41 个 lucide 图标已自托管到 `public/icons/lucide/`，由应用自身域名提供。
+
+### 离线说明
+
+- Cloudflare Pages 是静态托管平台，本身不能离线访问。
+- 离线能力来自 PWA：首次在线加载后，Service Worker 会预缓存应用壳与 `wllama.wasm`。
+- 模型导入后保存在本地 Cache Storage（`ai-models`）。
+- 满足上述条件后，断网仍可打开应用并进行本地 AI 对话。
+
+> 真机效果取决于 Safari 版本与设备；失败时会回退到 CPU 单线程兼容模式。
+
+### 关于跨域隔离
+
+跨域隔离（COOP `same-origin` + COEP）是启用 `SharedArrayBuffer` 与多线程推理的前提。
+
+- **Cloudflare Pages**：通过 `public/_headers` 直接下发 COOP / COEP，响应头由托管平台提供，页面加载即处于隔离环境。
+- **Service Worker**：仍然保留，用于离线回退，以及在无法自定义响应头的静态托管上按 UA 选择 COEP（Chromium 等使用 `credentialless`，Safari / iOS 使用 `require-corp`，因为 Safari 不支持 `credentialless`）。
+- **图标自托管**：lucide 图标已复制到 `public/icons/lucide/`，由同源提供，`require-corp` 下不会被跨域 CDN 拦截。
+
+**已知限制**：
+
+- Safari / iOS 各版本对跨域隔离与多线程的支持存在差异，真机效果以实际设备为准；Cloudflare Pages 部署本身不代表 iOS 已确认可多线程。
+- `require-corp` 要求所有跨域资源提供 CORP 或 CORS 响应头，引入新的外链资源时需自行确认。
+- 跨域隔离不可用或设备不支持 WebGPU 时，会回退到 CPU 单线程兼容模式，速度较慢但可完成基本对话。
+
+### 旧部署方式：GitHub Pages（可选）
+
+项目仍兼容 GitHub Pages。未设置 `CF_PAGES` 时，构建 `base` 保持为 `/TMPLNote/`，GitHub Pages 的项目子路径部署继续可用；`.github/workflows/deploy.yml` 仍可作为回退方案。
+
+#### 自动部署
 
 推送 `main` 分支会触发 `.github/workflows/deploy.yml`：安装依赖 → 构建 → 发布到 GitHub Pages。
 
@@ -172,7 +229,7 @@ npm run icons
 2. 将 **Source** 设为 **GitHub Actions**。
 3. 推送 `main`（或在 Actions 页手动运行 `Deploy to GitHub Pages`），等待工作流完成即可访问。
 
-### 本地构建部署（备选）
+#### 本地构建部署（备选）
 
 也可以本地构建后手动发布到 Pages：
 
@@ -182,9 +239,7 @@ npm run build
 
 将生成的 `dist/` 目录内容部署到任意静态托管即可（例如 GitHub Pages 的 `gh-pages` 分支）。
 
-> **关于跨域隔离**：GitHub Pages 为纯静态托管，无法自定义 HTTP 响应头。本项目通过 Service Worker 注入 `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`，在静态托管上实现跨域隔离，从而解锁本地 AI 的多线程推理。
->
-> **已知限制**：iOS Safari 不支持 `credentialless`，无法进入跨域隔离，因此移动端会按设计**关闭本地 AI**。
+> 注意：GitHub Pages 同样为纯静态托管，无法自定义 HTTP 响应头，跨域隔离依赖 Service Worker 注入，详见上文「关于跨域隔离」。
 
 ## AI 模型获取与使用
 
@@ -193,6 +248,7 @@ npm run build
 3. 在浏览器地址栏打开该链接，下载 GGUF 模型文件。
 4. 回到应用，点击**选择文件导入**，载入刚下载的 GGUF 文件。
 5. 载入完成后，进入**对话**页面开始使用。
+6. 移动端建议选择 Q4_0 模型，并在“性能模式”中选择“均衡”或“低功耗”；若设备不支持 WebGPU，会自动使用 CPU 兼容模式。
 
 > 注意：模型首次使用需联网下载（数百 MB）；下载完成后由浏览器缓存，之后可在离线状态下进行推理。
 
@@ -207,7 +263,7 @@ npm run build
 
 ```text
 TMPLNote/
-├─ public/              # 静态资源与 PWA 图标
+├─ public/              # 静态资源、PWA 图标、_headers 与本地 lucide 图标
 ├─ scripts/             # 构建辅助脚本（如生成图标）
 ├─ src/
 │  ├─ lib/

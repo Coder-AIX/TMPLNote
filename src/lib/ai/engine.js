@@ -18,6 +18,15 @@
  *    `loadModelFromUrl` / `downloadModel` / `getModelOrDownload` 路径写缓存。
  *    本文件走 `loadModel(Blob[])`（见 wllama.d.ts 第 313 行签名），源码确认该路径不接触
  *    cacheManager/modelManager，只把内存中的 Blob 交给 wasm，因此不会产生重复存储。
+ *
+ * ── 性能模式与自动降级 ──
+ * high（GPU 全层）在缺少 WebGPU / 显存不足 / 移动端驱动异常时会载入失败，因此载入按模式自动降级：
+ *   high     → high → balanced → low
+ *   balanced → balanced → low
+ *   low      → low
+ * 每次尝试使用全新的 Wllama 实例，失败实例立即 exit()，避免残留 Worker / wasm 内存。
+ * 实际生效的模式通过 `perfMode` getter 暴露（未载入为 null）。
+ * 移动端（无 WebGPU 或未跨域隔离）建议直接使用 balanced / low 的 CPU 兼容模式。
  */
 import { Wllama } from '@wllama/wllama/esm/index.js';
 import wllamaWasmUrl from '@wllama/wllama/esm/wasm/wllama.wasm?url';
@@ -33,6 +42,8 @@ export class AiEngine {
         this._modelId = null;
         /** @type {object|null} 当前载入配置快照 */
         this._config = null;
+        /** @type {('high'|'balanced'|'low'|null)} 实际生效的性能模式（可能因降级与请求值不同） */
+        this._perfMode = null;
     }
 
     /**
@@ -41,7 +52,7 @@ export class AiEngine {
      * @param {object} opts 选项
      * @param {Blob|File} opts.blob 模型字节（由调用方从缓存或会话文件提供）
      * @param {(p:{loaded:number,total:number|null,percent:number|null})=>void} [opts.onProgress] 进度回调
-     * @param {('high'|'balanced'|'low')} [opts.perfMode='high'] 性能模式：high=GPU 全层；balanced=CPU 全速；low=CPU 省电（限制线程数）
+     * @param {('high'|'balanced'|'low')} [opts.perfMode='high'] 性能模式：high=GPU 全层（失败自动降级到 CPU）；balanced=CPU 全速（失败降级 low）；low=CPU 省电（限制线程数）
      * @param {number} [opts.contextLength] 上下文长度（token）；由调用方（设置）传入，缺省 4096
      * @returns {Promise<void>}
      */
@@ -56,9 +67,16 @@ export class AiEngine {
             throw new Error('未提供模型文件');
         }
 
-        const wllama = new Wllama(CONFIG_PATHS);
-        // 关闭 compat（否则会走 CDN），保证离线可用；见文件顶部结论 4
-        wllama.setCompat(null);
+        // 请求模式非法时回退 high（与旧实现“非 low/balanced 即 GPU”保持一致）
+        const requested =
+            perfMode === 'high' || perfMode === 'balanced' || perfMode === 'low' ? perfMode : 'high';
+        // 降级顺序：GPU 失败会自动回退到 CPU 兼容模式
+        const attempts =
+            requested === 'high'
+                ? ['high', 'balanced', 'low']
+                : requested === 'balanced'
+                  ? ['balanced', 'low']
+                  : ['low'];
 
         // 与模式无关：关闭思考链（避免思考占满预算导致空回复/长时间满载）
         const base = {
@@ -84,54 +102,80 @@ export class AiEngine {
             (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
         // 上下文长度由调用方（设置）传入；非法时回退 4096（模型描述符不再自带 contextLength）
         const ctx = Number.isFinite(contextLength) && contextLength > 0 ? Math.floor(contextLength) : 4096;
-        let config;
-        if (perfMode === 'low') {
-            // 低功耗：CPU 推理（GPU 让给系统 UI）、限制线程数；上下文不再被性能模式压低
-            config = {
-                ...base,
-                n_gpu_layers: 0,
-                n_ctx: ctx,
-                n_threads: Math.max(1, Math.floor(cores / 2)),
-            };
-        } else if (perfMode === 'balanced') {
-            // 均衡：仍用 CPU 推理（部分层上 GPU 在移动端 WebGPU 可能算错），线程数接近全速
-            config = {
-                ...base,
-                n_gpu_layers: 0,
-                n_ctx: ctx,
-                n_threads: Math.max(1, cores - 1),
-            };
-        } else {
+        /** 按模式构造 loadModel 配置 */
+        const buildConfig = (mode) => {
+            if (mode === 'low') {
+                // 低功耗：CPU 推理（GPU 让给系统 UI）、限制线程数；上下文不再被性能模式压低
+                return {
+                    ...base,
+                    n_gpu_layers: 0,
+                    n_ctx: ctx,
+                    n_threads: Math.max(1, Math.floor(cores / 2)),
+                    // 保守分批：更小的批/微批 + 关闭预热，尽量压低移动端峰值内存与载入耗时
+                    n_batch: 128,
+                    n_ubatch: 64,
+                    warmup: false,
+                };
+            }
+            if (mode === 'balanced') {
+                // 均衡：仍用 CPU 推理（部分层上 GPU 在移动端 WebGPU 可能算错），线程数接近全速
+                return {
+                    ...base,
+                    n_gpu_layers: 0,
+                    n_ctx: ctx,
+                    n_threads: Math.max(1, cores - 1),
+                };
+            }
             // 性能优先：全部层上 GPU
-            config = {
+            return {
                 ...base,
                 n_gpu_layers: -1,
                 n_ctx: ctx,
             };
-        }
+        };
 
         // loadModel 只支持 Blob[]/Model，不接受进度回调（LoadModelParams 无 progressCallback），
-        // 因此对 Blob 直传路径给出合成进度：开始 0%、完成 100%。
+        // 因此对 Blob 直传路径给出合成进度：开始 0%、完成 100%（重试期间不重复上报 100%）。
         if (onProgress) onProgress({ loaded: 0, total: blob.size, percent: 0 });
 
-        try {
-            // Blob 直传：不落 wllama 自带缓存，避免重复持久化（见文件顶部结论 5）
-            await wllama.loadModel([blob], config);
-        } catch (error) {
-            // 载入失败：清理已创建的实例，避免残留
+        const tried = [];
+        let lastError = null;
+
+        for (const mode of attempts) {
+            tried.push(mode);
+            // 每次尝试都必须新建实例：失败实例的内部状态不可复用
+            const wllama = new Wllama(CONFIG_PATHS);
+            // 关闭 compat（否则会走 CDN），保证离线可用；见文件顶部结论 4
+            wllama.setCompat(null);
+            const config = buildConfig(mode);
+
             try {
-                await wllama.exit();
-            } catch (_) {
-                /* 忽略清理异常 */
+                // Blob 直传：不落 wllama 自带缓存，避免重复持久化（见文件顶部结论 5）
+                await wllama.loadModel([blob], config);
+            } catch (error) {
+                // 该模式载入失败：清理实例后继续降级，避免残留 Worker / wasm 内存
+                lastError = error;
+                try {
+                    await wllama.exit();
+                } catch (_) {
+                    /* 忽略清理异常 */
+                }
+                continue;
             }
-            throw error;
+
+            // 成功：记录实际生效的实例与模式
+            this._wllama = wllama;
+            this._modelId = model.id;
+            this._config = config;
+            this._perfMode = mode;
+
+            if (onProgress) onProgress({ loaded: blob.size, total: blob.size, percent: 100 });
+            return;
         }
 
-        if (onProgress) onProgress({ loaded: blob.size, total: blob.size, percent: 100 });
-
-        this._wllama = wllama;
-        this._modelId = model.id;
-        this._config = config;
+        // 全部模式失败：拼接错误信息（先算 detail，避免 ?. 与 + 的优先级陷阱）
+        const detail = lastError?.message || String(lastError);
+        throw new Error('模型载入失败（已尝试 ' + tried.join('/') + '）：' + detail);
     }
 
     /**
@@ -143,6 +187,7 @@ export class AiEngine {
         this._wllama = null;
         this._modelId = null;
         this._config = null;
+        this._perfMode = null;
         if (wllama) {
             try {
                 // 方法名依据 wllama.d.ts 第 380 行的 exit()
@@ -194,6 +239,11 @@ export class AiEngine {
     /** 是否已就绪 */
     get ready() {
         return Boolean(this._wllama);
+    }
+
+    /** 实际生效的性能模式：'high'|'balanced'|'low'；未载入为 null */
+    get perfMode() {
+        return this._perfMode;
     }
 
     /** 当前推理线程数；未载入模型返回 0 */

@@ -33,21 +33,26 @@
         </script>
         <script>
             // 跨域隔离引导：GitHub Pages 无法自定义响应头，改由 Service Worker 注入 COOP/COEP。
+            // SW 按 UA 选择 COEP：Chromium 用 credentialless，Safari/iOS 用 require-corp。
             // SW 首次接管后当前页面仍未隔离，需要自动刷新一次才会进入跨域隔离（解锁 wllama 多线程）。
+            // 若浏览器仍不支持（或 require-corp 被跨域资源阻断），只刷新一次后回退到 CPU 单线程兼容模式。
+            // 一次性标记使用 v2 键：M2 将 iOS Safari 的 COEP 由 credentialless 切换为 require-corp，
+            // 旧版留下的 'coi-reloaded' 标记会让升级后的页面跳过刷新、新 COEP 无法生效，
+            // 故换用 'coi-reloaded-v2'，给升级用户重新一次自动刷新机会（逻辑本身不变）。
             (function () {
                 if (!('serviceWorker' in navigator)) return;
                 if (window.crossOriginIsolated) {
                     // 已隔离：清掉一次性标记，便于下次（例如换环境后）能再次触发
-                    try { sessionStorage.removeItem('coi-reloaded'); } catch (e) {}
+                    try { sessionStorage.removeItem('coi-reloaded-v2'); } catch (e) {}
                     return;
                 }
                 var reloadOnce = function () {
                     if (window.crossOriginIsolated) return;
-                    // 只刷新一次，避免在无法隔离的环境（如 iOS Safari）里无限刷新
+                    // 只刷新一次，避免在无法隔离的环境里无限刷新
                     var done = false;
-                    try { done = sessionStorage.getItem('coi-reloaded') === '1'; } catch (e) {}
+                    try { done = sessionStorage.getItem('coi-reloaded-v2') === '1'; } catch (e) {}
                     if (done) return;
-                    try { sessionStorage.setItem('coi-reloaded', '1'); } catch (e) {}
+                    try { sessionStorage.setItem('coi-reloaded-v2', '1'); } catch (e) {}
                     location.reload();
                 };
                 if (navigator.serviceWorker.controller) {

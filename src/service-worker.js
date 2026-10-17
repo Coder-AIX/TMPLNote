@@ -7,8 +7,12 @@
  *  2. 预缓存构建产物并清理过期缓存（precacheAndRoute + cleanupOutdatedCaches）。
  *  3. 【核心】为同源「文档 / 导航」响应注入跨域隔离响应头：
  *       Cross-Origin-Opener-Policy:  same-origin
- *       Cross-Origin-Embedder-Policy: credentialless
- *     从而使 self.crossOriginIsolated === true，解锁 @wllama/wllama 的多线程推理（SharedArrayBuffer）。
+ *       Cross-Origin-Embedder-Policy: 按 UA 选择
+ *     从而尽量使 self.crossOriginIsolated === true，解锁 @wllama/wllama 的多线程推理（SharedArrayBuffer）。
+ *     COEP 取值说明：
+ *       - Chromium 等浏览器使用 credentialless：不拦截无 CORP 头的跨域资源（如 CDN 图标）；
+ *       - Safari / iOS 不支持 credentialless，改用 require-corp：以尽量在 iOS 上进入跨域隔离；
+ *       - 若最终仍无法进入跨域隔离，则由页面回退到单线程兼容模式。
  *  4. 运行时缓存 haronix 图标（jsdelivr CDN 上的 .svg）。
  *
  * 为什么必须由 Service Worker 注入响应头？
@@ -47,16 +51,36 @@ const COOP = 'Cross-Origin-Opener-Policy';
 const COEP = 'Cross-Origin-Embedder-Policy';
 
 /**
+ * 按 UA 选择 COEP：
+ * - Safari / iOS 不支持 credentialless，使用 require-corp；
+ * - 其它浏览器保持 credentialless，避免拦截无 CORP 头的跨域图标。
+ * @param {string} userAgent
+ * @returns {'require-corp'|'credentialless'}
+ */
+function pickCoep(userAgent) {
+  const ua = String(userAgent || '');
+  const ios = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && /Mobile/i.test(ua));
+  const safari = /Safari/i.test(ua) && !/Chrome|CriOS|Edg|OPR|Firefox|FxiOS/i.test(ua);
+  return ios || safari ? 'require-corp' : 'credentialless';
+}
+
+/**
  * 复制响应并追加跨域隔离头。
+ * COEP 按请求 UA 选择：Safari / iOS 用 require-corp，其它用 credentialless。
  * @param {Response} res
+ * @param {Request} [req]
  * @returns {Response}
  */
-function withCrossOriginIsolationHeaders(res) {
-  // 复制 headers 后「追加」隔离头；用 credentialless 而非 require-corp，
-  // 以免拦截 haronix-wc 从 cdn.jsdelivr.net 加载的跨域图标（无 CORP 头也不会被挡）。
+function withCrossOriginIsolationHeaders(res, req) {
+  // 复制 headers 后「追加」隔离头。
+  // Chromium 用 credentialless，以免拦截 haronix-wc 从 cdn.jsdelivr.net 加载的跨域图标（无 CORP 头也不会被挡）；
+  // Safari / iOS 不支持 credentialless，改用 require-corp 以争取进入跨域隔离。
+  // UA 来源：优先使用 SW 全局 self.navigator.userAgent（最可靠）；
+  // 请求头 user-agent 仅作兜底——它是 forbidden request header，在 SW 中不一定能读到（如 iOS Safari 可能为空）。
+  const ua = self.navigator?.userAgent || req?.headers?.get('user-agent') || '';
   const headers = new Headers(res.headers);
   headers.set(COOP, 'same-origin');
-  headers.set(COEP, 'credentialless');
+  headers.set(COEP, pickCoep(ua));
   return new Response(res.body, {
     status: res.status,
     statusText: res.statusText,
@@ -83,14 +107,14 @@ self.addEventListener('fetch', (event) => {
     (async () => {
       try {
         const res = await fetch(req);
-        return withCrossOriginIsolationHeaders(res);
+        return withCrossOriginIsolationHeaders(res, req);
       } catch (err) {
         // 离线回退：网络失败时回退到预缓存的 index.html，并同样注入隔离头。
         // 用 self.registration.scope 解析相对路径，规避 GitHub Pages 子路径（如 /repo/）问题。
         try {
           const fallbackUrl = new URL('index.html', self.registration.scope).href;
           const cached = await matchPrecache(fallbackUrl);
-          if (cached) return withCrossOriginIsolationHeaders(cached);
+          if (cached) return withCrossOriginIsolationHeaders(cached, req);
         } catch {
           // 忽略回退过程中的次级错误，向下抛出原始错误。
         }

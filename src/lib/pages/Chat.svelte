@@ -79,8 +79,8 @@
     /** 当前模型展示名；直接取 store 字段（覆盖推荐与自定义导入模型），缺失时回退为占位文案 */
     const modelLabel = $derived($ai.modelLabel || '未选择模型');
 
-    /** 是否满足对话前提：支持 WebGPU 且模型已载入就绪 */
-    const ready = $derived($ai.supported && $ai.state === 'ready');
+    /** 是否满足对话前提：模型已载入就绪（CPU 兼容模式下同样可用） */
+    const ready = $derived($ai.state === 'ready');
 
     /** AI 被环境关闭时的提示文案；reason 为空时回退到默认说明 */
     const disabledReason = $derived($ai.disabledReason || '当前环境不满足运行条件，AI 已关闭。');
@@ -377,6 +377,18 @@
                 </div>
             {/if}
 
+            {#if $ai.perfWarning}
+                <div
+                    class="mb-2 flex items-start gap-2 rounded-lg border border-amber-500/30
+                           bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400"
+                    role="status"
+                >
+                    <ha-icon name="info" collection="lucide" size="16" class="mt-0.5 shrink-0"
+                    ></ha-icon>
+                    <span class="min-w-0 break-words">{$ai.perfWarning}</span>
+                </div>
+            {/if}
+
             {#if $ai.disabled}
                 <div
                     class="mb-2 flex items-start gap-2 rounded-lg bg-[#ef4444]/10 px-3 py-2 text-sm
@@ -390,20 +402,6 @@
                         class="mt-0.5 shrink-0"
                     ></ha-icon>
                     <span>{disabledReason}</span>
-                </div>
-            {:else if !$ai.supported}
-                <div
-                    class="mb-2 flex items-start gap-2 rounded-lg bg-[var(--field)] px-3 py-2 text-sm
-                           text-[var(--fg-muted)]"
-                    role="status"
-                >
-                    <ha-icon
-                        name="triangle-alert"
-                        collection="lucide"
-                        size="16"
-                        class="mt-0.5 shrink-0"
-                    ></ha-icon>
-                    <span>当前浏览器不支持 WebGPU，无法使用本地对话。</span>
                 </div>
             {:else if !ready}
                 <div

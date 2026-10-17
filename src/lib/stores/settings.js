@@ -20,13 +20,29 @@ export const CONTEXT_MIN = 4096;
 export const CONTEXT_MAX = 51200;
 export const CONTEXT_STEP = 1024;
 
-/** 粗略判断当前是否为移动设备（用于选择默认上下文推荐值） */
+/**
+ * 粗略判断当前是否为移动设备（用于选择默认上下文推荐值、默认性能模式等）。
+ * 优先采信 UA-CH 的 mobile 标记；缺失时回退 UA 正则，并额外识别 iPadOS 13+
+ * （其 UA 伪装为 Macintosh，需要结合触点数判断）。
+ * @returns {boolean}
+ */
 export function isMobileDevice() {
     if (typeof navigator === 'undefined') return false;
     const uaData = navigator.userAgentData;
-    if (uaData && typeof uaData.mobile === 'boolean') return uaData.mobile;
+    if (uaData && typeof uaData.mobile === 'boolean' && uaData.mobile) return true;
     const ua = navigator.userAgent || '';
-    return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
+    // iPadOS 13+ 的 UA 可能是 Macintosh，需要结合触点数判断
+    const iPadOS = /Macintosh/i.test(ua) && Number(navigator.maxTouchPoints) > 1;
+    return iPadOS || /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
+}
+
+/**
+ * 按设备选择默认性能模式：移动端用 CPU 均衡模式，PC 用 GPU 全层。
+ * 仅在用户尚未保存过 aiPerfMode 时作为首跑默认值。
+ * @returns {'balanced'|'high'}
+ */
+export function defaultPerfModeForDevice() {
+    return isMobileDevice() ? 'balanced' : 'high';
 }
 
 /** 把任意输入夹取到 [CONTEXT_MIN, CONTEXT_MAX]；非法值回退 CONTEXT_MIN */
@@ -109,6 +125,10 @@ export async function loadSettings() {
             merged.aiContextLength = clampContextLength(
                 isMobileDevice() ? merged.aiContextLengthMobile : merged.aiContextLengthPc
             );
+        }
+        // 性能模式：仅首跑（未持久化）按设备给默认值，不覆盖用户已保存的选择
+        if (stored.aiPerfMode === undefined) {
+            merged.aiPerfMode = defaultPerfModeForDevice();
         }
 
         // 模型 id：首跑或持久化的 id 已失效（如旧的 functiongemma）时，按设备改为对应推荐

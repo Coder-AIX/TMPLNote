@@ -4,7 +4,8 @@
     // 下方「模型操作」通用区统一作用于「当前模型」；A1/A2 存储模式。
     // 推荐模型：复制下载链接后，在浏览器地址栏粘贴打开即可下载 GGUF，再回到此处「选择文件导入」；
     // 存储方式由设置 aiModelStorageMode 决定（cache=A1 持久缓存 / session=A2 仅本次会话）。
-    // 移动端硬件门槛不满足时（$ai.disabled）显示醒目提示并禁用选择文件 / 载入 / 去对话。
+    // 仅在真正不可用时（$ai.disabled，如无 WebAssembly）显示提示并禁用选择文件 / 载入 / 去对话；
+    // 无 WebGPU / 未跨域隔离不再阻止载入，而是走 CPU 单线程兼容模式（速度较慢但可用）。
     import { onMount } from 'svelte';
     import { Button, Heading, P, Label } from 'flowbite-svelte';
     import SelectMenu from './SelectMenu.svelte';
@@ -45,7 +46,7 @@
             ? 'CPU 推理并限制线程数（上下文仍按设置值）；最流畅但最慢。'
             : perfMode === 'balanced'
               ? 'CPU 推理，占用较多 CPU 核心；不占用 GPU，速度尚可、更少卡顿。'
-              : 'GPU 全部层加速，速度最快；设备可能发热或卡顿。'
+              : 'GPU 全部层加速，速度最快；设备可能发热或卡顿。移动端若出现卡顿或载入失败，建议改用“均衡”或“低功耗”。'
     );
     /** 模型存储方式镜像：'cache'=缓存到浏览器（A1）/ 'session'=仅本次会话（A2） */
     let storageMode = $state($settings.aiModelStorageMode ?? 'cache');
@@ -68,7 +69,7 @@
     });
 
     /**
-     * 运行诊断信息：跨域隔离 / CPU 核心数 / 推理线程数 / 上下文长度。
+     * 运行诊断信息：跨域隔离 / CPU 核心数 / 推理线程数 / 上下文长度 / 推理模式 / 线程模式 / 兼容提示。
      * 依赖 $ai.state，模型载入（ready）或卸载后就绪状态变化时自动重新读取线程数与上下文；
      * window/navigator 访问做非浏览器环境防御，避免构建或运行时报错。
      */
@@ -85,7 +86,20 @@
         // 未载入模型时 engine 返回 0，展示时按 0 处理为「—」
         const threads = aiEngine.threads;
         const contextLength = aiEngine.contextLength;
-        return { aiState, crossOriginIsolated, cores, threads, contextLength };
+        // 优先 engine 实际生效值；未载入时回退到 store（设置项 / 载入后写入的实际值）
+        const perfMode = aiEngine.perfMode || $ai.perfMode || '';
+        const singleThread = Boolean($ai.singleThread);
+        const perfWarning = String($ai.perfWarning || '');
+        return {
+            aiState,
+            crossOriginIsolated,
+            cores,
+            threads,
+            contextLength,
+            perfMode,
+            singleThread,
+            perfWarning
+        };
     });
 
     /** 当前模型共用的隐藏文件选择框引用（供「选择文件导入」按钮触发） */
@@ -283,21 +297,21 @@
                     {#if $ai.supported}
                         当前浏览器支持在本机运行模型。
                     {:else}
-                        当前浏览器不支持，无法载入模型（仍可下载并导入模型文件）。
+                        当前浏览器不支持 WebGPU，将使用 CPU 兼容模式（速度较慢）。
                     {/if}
                 </P>
             </div>
             <div
                 class="flex flex-none items-center gap-1.5 {$ai.supported
                     ? 'text-primary-500'
-                    : 'text-red-500'}"
+                    : 'text-amber-600'}"
             >
                 <ha-icon
-                    name={$ai.supported ? 'check' : 'alert-triangle'}
+                    name={$ai.supported ? 'check' : 'info'}
                     collection="lucide"
                     size="18"
                 ></ha-icon>
-                <span class="text-sm font-medium">{$ai.supported ? '支持' : '不支持'}</span>
+                <span class="text-sm font-medium">{$ai.supported ? '支持' : 'CPU 兼容'}</span>
             </div>
         </div>
 
@@ -353,7 +367,7 @@
         <div class="flex flex-col gap-0.5">
             <Label class="text-[15px] text-[var(--fg)]">运行诊断</Label>
             <P size="sm" class="text-[var(--fg-muted)]">
-                用于确认推理运行环境；跨域隔离未开启时推理会退回单线程。
+                用于确认推理运行环境；未开启跨域隔离时将使用单线程兼容模式。
             </P>
         </div>
         <div class="flex flex-col divide-y divide-[var(--divider)]">
@@ -363,10 +377,10 @@
                 <span
                     class="flex flex-none items-center gap-1.5 text-[13px] font-medium {diagnostics.crossOriginIsolated
                         ? 'text-primary-500'
-                        : 'text-red-500'}"
+                        : 'text-amber-600'}"
                 >
                     <ha-icon
-                        name={diagnostics.crossOriginIsolated ? 'check' : 'alert-triangle'}
+                        name={diagnostics.crossOriginIsolated ? 'check' : 'info'}
                         collection="lucide"
                         size="16"
                     ></ha-icon>
@@ -391,22 +405,63 @@
             </div>
 
             <!-- 上下文（n_ctx） -->
-            <div class="flex items-center justify-between gap-4 py-3 last:pb-0">
+            <div class="flex items-center justify-between gap-4 py-3">
                 <span class="text-[13px] text-[var(--fg-muted)]">上下文（n_ctx）</span>
                 <span class="flex-none text-[13px] font-medium text-[var(--fg)]">
                     {diagnostics.contextLength > 0 ? diagnostics.contextLength : '—'}
                 </span>
             </div>
+
+            <!-- 推理模式（实际生效值；未载入或未知显示「—」） -->
+            <div class="flex items-center justify-between gap-4 py-3">
+                <span class="text-[13px] text-[var(--fg-muted)]">推理模式</span>
+                <span class="flex-none text-[13px] font-medium text-[var(--fg)]">
+                    {diagnostics.perfMode === 'high'
+                        ? 'GPU（high）'
+                        : diagnostics.perfMode === 'balanced'
+                          ? 'CPU（balanced）'
+                          : diagnostics.perfMode === 'low'
+                            ? 'CPU（low）'
+                            : '—'}
+                </span>
+            </div>
+
+            <!-- 线程模式 -->
+            <div class="flex items-center justify-between gap-4 py-3">
+                <span class="text-[13px] text-[var(--fg-muted)]">线程模式</span>
+                <span
+                    class="flex-none text-[13px] font-medium {diagnostics.aiState === 'ready' &&
+                    diagnostics.singleThread
+                        ? 'text-amber-600'
+                        : 'text-[var(--fg)]'}"
+                >
+                    {diagnostics.aiState === 'ready'
+                        ? diagnostics.singleThread
+                            ? '单线程兼容'
+                            : '多线程'
+                        : '—'}
+                </span>
+            </div>
+
+            <!-- 兼容提示（可能较长，允许换行且窄屏不溢出） -->
+            <div class="flex items-start justify-between gap-4 py-3 last:pb-0">
+                <span class="flex-none text-[13px] text-[var(--fg-muted)]">兼容提示</span>
+                <span
+                    class="min-w-0 flex-1 break-words text-right text-[13px] font-medium text-[var(--fg)]"
+                >
+                    {diagnostics.perfWarning || '—'}
+                </span>
+            </div>
         </div>
 
-        <!-- 跨域隔离未开启时的醒目提示 -->
+        <!-- 跨域隔离未开启时的兼容提示（中性/amber，不影响基本对话） -->
         {#if !diagnostics.crossOriginIsolated}
-            <div class="flex items-start gap-2" role="alert">
-                <span class="mt-0.5 flex-none text-red-500">
-                    <ha-icon name="alert-triangle" collection="lucide" size="16"></ha-icon>
+            <div class="flex items-start gap-2" role="status">
+                <span class="mt-0.5 flex-none text-amber-600">
+                    <ha-icon name="info" collection="lucide" size="16"></ha-icon>
                 </span>
-                <P size="sm" class="text-red-500">
-                    跨域隔离未开启，推理将退回单线程，移动端会非常慢。
+                <P size="sm" class="text-[var(--fg-muted)]">
+                    未开启跨域隔离，将使用单线程兼容模式，速度较慢；不影响基本对话。
                 </P>
             </div>
         {/if}
@@ -533,7 +588,6 @@
                     size="sm"
                     disabled={!isAvailable(currentModel) ||
                         $ai.state === 'loading' ||
-                        !$ai.supported ||
                         $ai.disabled}
                     onclick={() => currentModel && loadModel(currentModel.id)}
                     class="w-full sm:w-auto"
@@ -611,8 +665,8 @@
     </div>
 
     {#if !$ai.supported}
-        <P size="sm" class="text-red-500" role="alert">
-            当前浏览器不支持 WebGPU，无法载入模型；可先下载并导入模型文件，待更换浏览器后使用。
+        <P size="sm" class="text-amber-600" role="status">
+            当前浏览器不支持 WebGPU，载入后将使用 CPU 兼容模式，速度较慢。
         </P>
     {/if}
     {#if $ai.error}

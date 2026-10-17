@@ -3,10 +3,46 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+/**
+ * dev / preview 的跨域隔离头：
+ * - Safari / iOS 不支持 credentialless，使用 require-corp；
+ * - 其它浏览器使用 credentialless，避免拦截无 CORP 头的跨域图标。
+ * 生产环境由 service-worker.js 按 UA 注入同样的头。
+ */
+function crossOriginIsolationHeaders() {
+    /** @param {import('node:http').IncomingMessage} req */
+    const pickCoep = (req) => {
+        const ua = String(req.headers['user-agent'] || '');
+        const ios = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && /Mobile/i.test(ua));
+        const safari = /Safari/i.test(ua) && !/Chrome|CriOS|Edg|OPR|Firefox|FxiOS/i.test(ua);
+        return ios || safari ? 'require-corp' : 'credentialless';
+    };
+    /** @type {import('node:http').RequestListener} */
+    const middleware = (req, res, next) => {
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', pickCoep(req));
+        next();
+    };
+    return {
+        name: 'coi-headers',
+        configureServer(server) {
+            server.middlewares.use(middleware);
+        },
+        configurePreviewServer(server) {
+            server.middlewares.use(middleware);
+        }
+    };
+}
+
+// Cloudflare Pages 构建时自动注入 CF_PAGES=1；此时部署在根路径。
+// 未设置时保持 GitHub Pages 项目子路径，兼容旧部署。
+const isCloudflarePages = Boolean(process.env.CF_PAGES);
+const base = isCloudflarePages ? '/' : '/TMPLNote/';
+
 export default defineConfig({
-    // GitHub Pages 项目页子路径：https://<user>.github.io/TMPLNote/
-    base: '/TMPLNote/',
+    base,
     plugins: [
+        crossOriginIsolationHeaders(),
         tailwindcss(),
         svelte(),
         VitePWA({
@@ -21,8 +57,8 @@ export default defineConfig({
                 short_name: 'TMPLNote',
                 description: '基于 Svelte + PWA 的响应式笔记模板（左侧导航栏 + 右侧内容区）',
                 lang: 'zh-CN',
-                start_url: '/TMPLNote/',
-                scope: '/TMPLNote/',
+                start_url: base,
+                scope: base,
                 display: 'standalone',
                 theme_color: '#F6BF33',
                 background_color: '#ffffff',
@@ -47,20 +83,8 @@ export default defineConfig({
         }),
     ],
     server: {
-        headers: {
-            // 启用跨域隔离以解锁 wllama 多线程（SharedArrayBuffer）。
-            // 用 credentialless 避免拦截跨域图标（haronix-wc 从 jsdelivr 加载）。
-            'Cross-Origin-Opener-Policy': 'same-origin',
-            'Cross-Origin-Embedder-Policy': 'credentialless',
-        },
         allowedHosts: [
             'nkziolmd.beesnat.com'
         ]
     },
-    preview: {
-        headers: {
-            'Cross-Origin-Opener-Policy': 'same-origin',
-            'Cross-Origin-Embedder-Policy': 'credentialless',
-        },
-    }
 });
