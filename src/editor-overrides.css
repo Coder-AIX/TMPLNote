@@ -128,8 +128,14 @@
 }
 
 /* --------------------------------------------------------------------------
-   8) 正文排版：统一行高 1.8、元素上下外边距归零；标题字号分级 + 上边距
+   8) 正文排版：基础字号 16px、统一行高 1.8、元素上下外边距归零；
+      标题字号分级 + 上边距
+      · Fluent 的 .ql-container 默认 font-size: 13px，这里只覆盖编辑器正文
    -------------------------------------------------------------------------- */
+.ql-container.ql-snow .ql-editor {
+    font-size: 16px;
+}
+
 .ql-container.ql-snow .ql-editor,
 .ql-container.ql-snow .ql-editor * {
     line-height: 1.8;
@@ -169,50 +175,180 @@
 }
 
 /* --------------------------------------------------------------------------
-   9) 列表与任务列表（保留既有有效规则）
+   9) 列表与任务列表：统一「标记槽」几何、缩进步长与点击热区
+      同时覆盖两套 DOM：
+      ① 类名版：li.ordered / li.bullet / li.checked / li.unchecked
+      ② data-list 版：li[data-list='ordered'|'bullet'|'checked'|'unchecked']
+      几何模型：
+      · li 的 padding-left = 标记槽 + 层级 × 步长 → 正文起点
+      · 标记绝对定位在 [层级 × 步长, +标记槽] 区间内并水平居中
+      · 任务勾选框在同一区间内居中，顶部对齐首行
    -------------------------------------------------------------------------- */
 
-/* 9.1 列表整体左侧不缩进，与正文左对齐（不影响 ql-indent 的层级缩进） */
-.ql-container .ql-editor ol,
-.ql-container .ql-editor ul {
+/* 9.1 列表几何变量（仅在编辑器内容区生效，便于集中微调） */
+.ql-container.ql-snow .ql-editor {
+    --list-gutter: 1.5rem;        /* 24px：标记槽宽 / 正文基础起点 */
+    --list-indent-step: 1.125rem; /* 18px：每级缩进步长（≤ 24px） */
+    --list-check-size: 1.125rem;  /* 18px：任务勾选框视觉尺寸 */
+    --list-check-hit: 1.875rem;   /* 30px：任务勾选框最小点击热区 */
+    --list-level: 0;              /* 由 li.ql-indent-N 覆盖 */
+}
+
+/* 9.2 列表容器：去掉 Quill/Fluent 的默认左内边距，与正文左对齐 */
+.ql-container.ql-snow .ql-editor ol,
+.ql-container.ql-snow .ql-editor ul {
     padding-left: 0;
-}
-
-/* 9.2 无序列表圆点在左侧缩进区（0 ~ 1.5em）内水平居中
-       同时覆盖两套实现：
-       ① 类名机制：li.bullet::before 在流内，用 margin-left:-1.5em 拉回左侧
-       ② Quill 2 机制：li[data-list='bullet'] > .ql-ui::before 为绝对定位，显式 left:0 */
-.ql-container .ql-editor li.bullet::before {
-    width: 1.5em;
-    margin-left: -1.5em;
-    margin-right: 0;
-    text-align: center;
-}
-
-.ql-container .ql-editor li[data-list='bullet'] > .ql-ui {
-    left: 0;
-}
-
-.ql-container .ql-editor li[data-list='bullet'] > .ql-ui:before {
-    width: 1.5em;
     margin-left: 0;
-    margin-right: 0;
+}
+
+/* 9.3 列表项：正文起点 = 标记槽 + 层级 × 步长
+       ql-indent-N 只改 --list-level，标记与正文因此同步位移 */
+.ql-container.ql-snow .ql-editor li {
+    --list-level: 0;
+    position: relative;
+    padding-left: calc(
+        var(--list-gutter) + var(--list-level) * var(--list-indent-step)
+    );
+}
+
+.ql-container.ql-snow .ql-editor li.ql-indent-1 { --list-level: 1; }
+.ql-container.ql-snow .ql-editor li.ql-indent-2 { --list-level: 2; }
+.ql-container.ql-snow .ql-editor li.ql-indent-3 { --list-level: 3; }
+.ql-container.ql-snow .ql-editor li.ql-indent-4 { --list-level: 4; }
+.ql-container.ql-snow .ql-editor li.ql-indent-5 { --list-level: 5; }
+.ql-container.ql-snow .ql-editor li.ql-indent-6 { --list-level: 6; }
+.ql-container.ql-snow .ql-editor li.ql-indent-7 { --list-level: 7; }
+.ql-container.ql-snow .ql-editor li.ql-indent-8 { --list-level: 8; }
+.ql-container.ql-snow .ql-editor li.ql-indent-9 { --list-level: 9; }
+
+/* 9.4 有序 / 无序（类名版）：::before 绝对定位到标记槽内并水平居中
+       保留 Fluent 提供的 content（计数器 / 圆点），不重写编号样式。
+       top: 0 + line-height: inherit 使标记始终停在首行。 */
+.ql-container.ql-snow .ql-editor li.ordered::before,
+.ql-container.ql-snow .ql-editor li.bullet::before {
+    position: absolute;
+    left: calc(var(--list-level) * var(--list-indent-step));
+    top: 0;
+    width: var(--list-gutter);
+    margin: 0;
+    padding: 0;
     text-align: center;
+    white-space: nowrap;
+    line-height: inherit;
+    box-sizing: border-box;
 }
 
-/* 9.3 任务列表勾选框：移回内容区左侧（不再伸入编辑器内边距），并改为圆角 */
-.ql-container .ql-editor li.checked > .ql-ui,
-.ql-container .ql-editor li.unchecked > .ql-ui {
-    left: 0;
-    margin-left: 0;
-    border-radius: 4px;
-}
-
-/* 9.4 勾选框随行高对齐：行高 1.8 时首行中线在 0.9em 处，勾选框 16px 高（半高 8px） */
-.ql-container .ql-editor li.checked > .ql-ui,
-.ql-container .ql-editor li.unchecked > .ql-ui {
-    top: calc(0.9em - 8px);
+/* 9.5 有序 / 无序（data-list 版）：把零尺寸 .ql-ui 改成标记槽
+       需覆盖 Quill 的 margin-left:-1.5em / margin-right:.3em / width:1.2em，
+       以及 Fluent 给 li > .ql-ui 的 bottom:0。 */
+.ql-container.ql-snow .ql-editor li[data-list='ordered'] > .ql-ui,
+.ql-container.ql-snow .ql-editor li[data-list='bullet'] > .ql-ui {
+    position: absolute;
+    left: calc(var(--list-level) * var(--list-indent-step));
+    top: 0;
     bottom: auto;
+    width: var(--list-gutter);
+    height: auto;
+    margin: 0;
+    padding: 0;
+    line-height: inherit;
+    color: inherit;
+    text-align: center;
+    box-sizing: border-box;
+}
+
+.ql-container.ql-snow .ql-editor li[data-list='ordered'] > .ql-ui::before,
+.ql-container.ql-snow .ql-editor li[data-list='bullet'] > .ql-ui::before {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    text-align: center;
+    white-space: nowrap;
+    line-height: inherit;
+    box-sizing: border-box;
+}
+
+/* 9.6 任务勾选框（两套模型）：18×18 视觉方块，居于标记槽中心，固定首行
+       left = 层级 × 步长 + (标记槽 - 勾选框) / 2
+       top  = (行高 1.8em - 勾选框) / 2 */
+.ql-container.ql-snow .ql-editor li.checked > .ql-ui,
+.ql-container.ql-snow .ql-editor li.unchecked > .ql-ui,
+.ql-container.ql-snow .ql-editor li[data-list='checked'] > .ql-ui,
+.ql-container.ql-snow .ql-editor li[data-list='unchecked'] > .ql-ui {
+    position: absolute;
+    left: calc(
+        var(--list-level) * var(--list-indent-step) +
+        (var(--list-gutter) - var(--list-check-size)) / 2
+    );
+    top: calc((1.8em - var(--list-check-size)) / 2);
+    bottom: auto;
+    width: var(--list-check-size);
+    height: var(--list-check-size);
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    z-index: 1;
+}
+
+/* 9.7 类名版任务项正文颜色：Fluent 对 li.checked / li.unchecked 设了
+       color: initial（深色模式下会变成黑字），这里恢复为继承编辑器文字色。
+       勾选框自身颜色由 .ql-ui 规则单独控制，不受影响。 */
+.ql-container.ql-snow .ql-editor li.checked,
+.ql-container.ql-snow .ql-editor li.unchecked {
+    color: inherit;
+}
+
+/* 9.8 data-list 勾选框：隐藏 Quill 的 ☐ / ☑ 字形，改用与类名版一致的方框 */
+.ql-container.ql-snow .ql-editor li[data-list='checked'] > .ql-ui::before,
+.ql-container.ql-snow .ql-editor li[data-list='unchecked'] > .ql-ui::before {
+    content: '';
+}
+
+.ql-container.ql-snow .ql-editor li[data-list='unchecked'] > .ql-ui {
+    border: 1px solid #adb0b8;
+    background: transparent;
+}
+
+/* 9.8.1 勾选态：覆盖 Fluent 默认蓝色，改用应用主题琥珀色。
+        同时覆盖类名版 li.checked 与 data-list 版，二者使用同一套几何。
+        勾选图标使用深色 #1f2329，保证在黄色背景上的对比度；
+        浅色 / 深色模式下主题色与图标色保持一致。 */
+.ql-container.ql-snow .ql-editor li.checked > .ql-ui,
+.ql-container.ql-snow .ql-editor li[data-list='checked'] > .ql-ui {
+    border: 1px solid var(--color-primary-600);
+    background-color: var(--color-primary-500);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpolyline points='2.6,11 6.9,15.2 17.4,4.8' fill='none' stroke='%231f2329' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 80% 80%;
+}
+
+/* 9.9 用伪元素把点击热区扩到 30×30，不改变 18×18 视觉尺寸。
+       事件监听绑定在 .ql-ui 上，伪元素命中时事件目标仍是 .ql-ui。 */
+.ql-container.ql-snow .ql-editor li.checked > .ql-ui::after,
+.ql-container.ql-snow .ql-editor li.unchecked > .ql-ui::after,
+.ql-container.ql-snow .ql-editor li[data-list='checked'] > .ql-ui::after,
+.ql-container.ql-snow .ql-editor li[data-list='unchecked'] > .ql-ui::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--list-check-hit);
+    height: var(--list-check-hit);
+    transform: translate(-50%, -50%);
+}
+
+/* 9.10 编号连续性：Quill/Fluent 会在每个 <p> 上重置 list-N 计数器。
+       空段落（仅 <br> 或完全空白）不重置，使被空行分隔的有序列表继续编号；
+       非空段落 / 标题仍按原规则重置。 */
+.ql-container.ql-snow .ql-editor p:is(:empty, :has(> br:only-child)) {
+    counter-reset: none;
+    counter-set: none;
 }
 
 /* --------------------------------------------------------------------------

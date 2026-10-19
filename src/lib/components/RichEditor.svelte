@@ -59,6 +59,275 @@
     let container;
     let editor = null;
 
+    // —— 外部 value 同步状态 ——
+    // ready：初始化写入完成前不响应外部值，避免与 onMount 内的首次赋值竞争。
+    // lastAppliedValue：当前编辑器内容对应的「外部值」，用于识别父级回写，防止覆盖/循环。
+    let ready = $state(false);
+    let lastAppliedValue = '';
+    // 程序化写入会被 Quill 的 MutationObserver 转成 source === 'user' 的 text-change，
+    // 用该标记将其与真实用户输入区分，避免触发父级保存。
+    let applyingExternal = false;
+    let externalClearTimer = 0;
+
+    const LIST_TYPE_CLASSES = ['ordered', 'bullet', 'checked', 'unchecked'];
+    const LIST_DATA_MAP = {
+        ordered: 'ordered',
+        bullet: 'bullet',
+        checked: 'checked',
+        unchecked: 'unchecked'
+    };
+
+    /** 元素是否已带有列表类型类 */
+    function hasListTypeClass(el) {
+        return LIST_TYPE_CLASSES.some((name) => el.classList.contains(name));
+    }
+
+    /**
+     * 确保列表类型类存在且位于 class 首位。
+     * FluentEditor 的类名版 ListItem 通过 classList.item(0) 读取列表类型，
+     * 因此 `ql-indent-1 unchecked` 会被误读为 `ql-indent-1`，必须把类型类前置。
+     */
+    function ensureFirstClass(el, name) {
+        if (!el.classList.contains(name)) el.classList.add(name);
+        if (el.classList[0] === name) return;
+        const rest = Array.from(el.classList).filter((cls) => cls !== name);
+        el.className = [name, ...rest].join(' ');
+    }
+
+    /**
+     * 当前 li 自己的任务 checkbox（Markdown 任务项）。
+     * 用 closest('li') 归属判断，支持 li > input 与 li > p > input（松散列表），
+     * 且不会误取深层嵌套 li 内的 checkbox。
+     */
+    function findOwnTaskCheckbox(li) {
+        return Array.from(li.querySelectorAll('input[type="checkbox"]')).find(
+            (input) => input.closest('li') === li
+        );
+    }
+
+    /** 读取 li 的 ql-indent-N 层级，无则 0 */
+    function getIndentLevel(li) {
+        for (let level = 9; level >= 1; level -= 1) {
+            if (li.classList.contains(`ql-indent-${level}`)) return level;
+        }
+        return 0;
+    }
+
+    /**
+     * 设置 li 缩进层级（1..9），替换旧 ql-indent-N，
+     * 并重新把列表类型类放回 class 首位。
+     */
+    function setIndentLevel(li, level) {
+        const target = Math.max(1, Math.min(9, level));
+        for (let i = 1; i <= 9; i += 1) li.classList.remove(`ql-indent-${i}`);
+        li.classList.add(`ql-indent-${target}`);
+        const type = LIST_TYPE_CLASSES.find((name) => li.classList.contains(name));
+        if (type) ensureFirstClass(li, type);
+    }
+
+    /**
+     * 嵌套列表扁平化：Fluent 的 ListContainer 只接受直接 li 子项，
+     * 因此把 li > ol 中的 li 提升为同级项，并用 ql-indent-N 表达层级。
+     * 遍历文档顺序即可处理任意深度（NodeList 为快照，移出后的 li 仍会被访问）。
+     */
+    function flattenNestedLists(root) {
+        Array.from(root.querySelectorAll('li')).forEach((li) => {
+            const nestedLists = Array.from(li.children).filter((el) => el.tagName === 'OL');
+            if (!nestedLists.length) return;
+
+            const parentLevel = getIndentLevel(li);
+            let cursor = li;
+
+            nestedLists.forEach((nested) => {
+                Array.from(nested.children)
+                    .filter((el) => el.tagName === 'LI')
+                    .forEach((child) => {
+                        const ownLevel = getIndentLevel(child);
+                        const level = Math.min(9, Math.max(ownLevel, parentLevel + 1));
+                        setIndentLevel(child, level);
+                        // 按原顺序插到父 li 之后
+                        cursor.after(child);
+                        cursor = child;
+                    });
+                // 子项已全部移出，移除空的嵌套列表容器
+                if (!nested.querySelector('li')) nested.remove();
+            });
+        });
+    }
+
+    /**
+     * 历史内容列表规范化（纯函数，幂等）。
+     *
+     * - <ul> → <ol>
+     * - data-list="ordered|bullet|checked|unchecked" → 同名类
+     * - 纯 <li> 按父级类型补类
+     * - Markdown <input type="checkbox"> → checked/unchecked 类并移除 input
+     * - 保留 ql-indent-N、其它类名、文本、链接、图片与行内格式
+     */
+    function normalizeEditorHtml(html) {
+        if (typeof html !== 'string') return '';
+        if (!html || typeof DOMParser === 'undefined') return html;
+
+        try {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const root = doc.body;
+            if (!root) return html;
+
+            // 0) 丢弃历史保存中携带的 Quill UI 标记（li > .ql-ui）。
+            // 二次加载时 ListItem 会重新生成 UI 节点；旧的序列化节点会残留在新节点之后，
+            // 因相同定位盖在上方并拦截点击，导致勾选框无法切换。
+            Array.from(root.querySelectorAll('li > .ql-ui')).forEach((node) => node.remove());
+
+            // 1) ul → ol（Fluent 的 ListContainer 只接受 ol）
+            const converted = new Set();
+            Array.from(root.querySelectorAll('ul')).forEach((ul) => {
+                const ol = doc.createElement('ol');
+                Array.from(ul.attributes).forEach((attr) => ol.setAttribute(attr.name, attr.value));
+                while (ul.firstChild) ol.appendChild(ul.firstChild);
+                ul.replaceWith(ol);
+                converted.add(ol);
+            });
+
+            // 2) 为列表容器补齐类型类（类型类需位于 class 首位）
+            Array.from(root.querySelectorAll('ol')).forEach((ol) => {
+                if (hasListTypeClass(ol)) {
+                    const firstType = LIST_TYPE_CLASSES.find((name) => ol.classList.contains(name));
+                    if (firstType) ensureFirstClass(ol, firstType);
+                    return;
+                }
+
+                const lis = Array.from(ol.children).filter((el) => el.tagName === 'LI');
+                const hasTask = lis.some(
+                    (li) =>
+                        ['checked', 'unchecked'].includes(
+                            (li.getAttribute('data-list') || '').toLowerCase()
+                        ) ||
+                        li.classList.contains('checked') ||
+                        li.classList.contains('unchecked') ||
+                        Boolean(findOwnTaskCheckbox(li))
+                );
+                const hasOrdered = lis.some(
+                    (li) =>
+                        (li.getAttribute('data-list') || '').toLowerCase() === 'ordered' ||
+                        li.classList.contains('ordered')
+                );
+                const hasBullet = lis.some(
+                    (li) =>
+                        (li.getAttribute('data-list') || '').toLowerCase() === 'bullet' ||
+                        li.classList.contains('bullet')
+                );
+
+                let type = 'ordered';
+                if (hasTask) type = 'unchecked';
+                else if (hasOrdered) type = 'ordered';
+                else if (hasBullet) type = 'bullet';
+                else if (converted.has(ol)) type = 'bullet';
+
+                ensureFirstClass(ol, type);
+            });
+
+            // 3) li 类型补齐
+            Array.from(root.querySelectorAll('li')).forEach((li) => {
+                // Markdown 任务项：按 input.checked 补类，移除当前 li 自己的 input，保留其余内容
+                // （支持 li > input 与 li > p > input；不误删嵌套 li 的 checkbox）
+                const checkbox = findOwnTaskCheckbox(li);
+                if (checkbox) {
+                    const checked = checkbox.checked || checkbox.hasAttribute('checked');
+                    ensureFirstClass(li, checked ? 'checked' : 'unchecked');
+                    Array.from(li.querySelectorAll('input[type="checkbox"]'))
+                        .filter((input) => input.closest('li') === li)
+                        .forEach((input) => input.remove());
+                }
+
+                // data-list → 同名类
+                const dataList = (li.getAttribute('data-list') || '').toLowerCase();
+                if (LIST_DATA_MAP[dataList]) {
+                    ensureFirstClass(li, LIST_DATA_MAP[dataList]);
+                    li.removeAttribute('data-list');
+                }
+
+                // 纯 li：按父级类型补类
+                if (!hasListTypeClass(li)) {
+                    const parent = li.parentElement;
+                    if (parent && (parent.tagName === 'OL' || parent.tagName === 'UL')) {
+                        let type = '';
+                        if (parent.classList.contains('bullet')) type = 'bullet';
+                        else if (parent.classList.contains('ordered')) type = 'ordered';
+                        else if (parent.classList.contains('unchecked')) type = 'unchecked';
+                        else if (parent.classList.contains('checked')) type = 'checked';
+                        else type = parent.tagName === 'UL' ? 'bullet' : 'ordered';
+                        ensureFirstClass(li, type);
+                    } else {
+                        ensureFirstClass(li, 'bullet');
+                    }
+                }
+            });
+
+            // 4) 嵌套列表扁平化：li > ol 提升为同级 li + ql-indent-N
+            flattenNestedLists(root);
+
+            // 5) 全量类型类前置：
+            // 保存后的历史内容可能出现 `ql-indent-1 unchecked`，而 Fluent 的类名版
+            // ListItem 用 classList.item(0) 读取类型，类型类不在首位会导致点击无效。
+            Array.from(root.querySelectorAll('li')).forEach((li) => {
+                const type = LIST_TYPE_CLASSES.find((name) => li.classList.contains(name));
+                if (type) ensureFirstClass(li, type);
+            });
+
+            return root.innerHTML;
+        } catch (_) {
+            // 解析失败时回退原值
+            return html;
+        }
+    }
+
+    /**
+     * 将外部值写入编辑器。
+     * 只在「实际内容不同」时改写 DOM；同时清理撤销历史，避免 Ctrl+Z 恢复上一条笔记。
+     */
+    function applyExternalValue(next) {
+        if (!editor) return;
+
+        const normalized = normalizeEditorHtml(next);
+        if (normalized !== editor.root.innerHTML) {
+            applyingExternal = true;
+            editor.root.innerHTML = normalized;
+            try {
+                editor.setSelection(null);
+            } catch (_) {
+                // 忽略选区异常
+            }
+        }
+
+        // 立即清理 + 延迟清理：
+        // 直接写 innerHTML 会由 Quill 的 MutationObserver 异步转成一次 text-change，
+        // 延迟清理可确保这次程序化变更不会留在撤销栈中。
+        try {
+            editor.history.clear();
+        } catch (_) {
+            // 忽略历史模块缺失
+        }
+        clearTimeout(externalClearTimer);
+        externalClearTimer = setTimeout(() => {
+            try {
+                editor?.history.clear();
+            } catch (_) {
+                // 忽略历史模块缺失
+            }
+            applyingExternal = false;
+        }, 0);
+    }
+
+    // 响应外部 value 变化（切换笔记、清空、重载）。
+    // 用户输入时 onchange 路径会同步 lastAppliedValue，因此父级回写不会进入这里。
+    $effect(() => {
+        const next = typeof value === 'string' ? value : '';
+        if (!ready) return;
+        if (next === lastAppliedValue) return;
+        lastAppliedValue = next;
+        applyExternalValue(next);
+    });
+
     // 停靠状态
     let focused = false;
     let docked = false;
@@ -199,15 +468,22 @@
         // 构造完成后立即重绘图标（此时 buildButtons 已执行，且不会再被覆盖）
         paintToolbarIcons();
 
-        if (value) {
-            editor.root.innerHTML = value;
-        }
+        // 初始赋值：先规范化历史列表，再写入编辑器
+        const initialValue = typeof value === 'string' ? value : '';
+        editor.root.innerHTML = normalizeEditorHtml(initialValue);
+        lastAppliedValue = initialValue;
 
-        // 仅在用户输入时回调；忽略 api/silent 变更，避免初始化与程序化赋值触发自动保存
+        // 仅在用户输入时回调；忽略 api/silent 变更，避免初始化与程序化赋值触发自动保存。
+        // applyingExternal：程序化写 innerHTML 会被 Quill 视为 user 变更，需抑制回调并更新基线。
         editor.on('text-change', (delta, oldDelta, source) => {
-            if (source === 'user') {
-                onchange?.(editor.root.innerHTML);
+            if (source !== 'user') return;
+            if (applyingExternal) {
+                lastAppliedValue = editor.root.innerHTML;
+                return;
             }
+            const html = editor.root.innerHTML;
+            lastAppliedValue = html;
+            onchange?.(html);
         });
 
         // 选区变化：有选区=聚焦，null=失焦
@@ -325,11 +601,15 @@
         }
         window.addEventListener('resize', onViewportChange);
         window.addEventListener('orientationchange', onOrientationChange);
+
+        // 初始化完成：此后的 value 变化都视为外部切换
+        ready = true;
     });
 
     onDestroy(() => {
         cancelAnimationFrame(rafId);
         clearSettleTimers();
+        clearTimeout(externalClearTimer);
         if (vv && onViewportChange) {
             vv.removeEventListener('resize', onViewportChange);
             vv.removeEventListener('scroll', onViewportChange);
