@@ -137,7 +137,7 @@
     breakpoint="lg"
     position="fixed"
     ariaLabel="笔记文件夹"
-    class="h-dvh w-[230px] bg-[var(--canvas)] dark:bg-[var(--canvas)]"
+    class="h-dvh w-[280px] bg-[var(--canvas)] dark:bg-[var(--canvas)]"
     classes={{ div: 'flex h-full w-full flex-col overflow-y-auto bg-[var(--canvas)] px-3 pt-4 pb-[calc(1rem+env(safe-area-inset-bottom))]' }}
 >
     <h1 class="px-3 pb-4">

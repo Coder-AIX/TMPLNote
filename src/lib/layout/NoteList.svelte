@@ -14,6 +14,16 @@
         bumpNotes
     } from '../stores/workspace.js';
 
+    /** 笔记列表摘要：只取正文第一行（<br> 或块级标签结束处截断）。 */
+    function firstLineSummary(html) {
+        if (typeof html !== 'string') return '';
+        const firstLine = html
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/(?:p|div|h[1-6]|li|blockquote|pre|section)\s*>/gi, '\n')
+            .split('\n')[0];
+        return htmlToText(firstLine);
+    }
+
     let search = $state('');
     let debouncedSearch = $state('');
     let sortBy = $state('createdAt');
@@ -354,7 +364,7 @@
         {:else}
             <ul>
                 {#each notes as n (n.id)}
-                    {@const summary = htmlToText(n.content)}
+                    {@const summary = firstLineSummary(n.content)}
                     <li
                         class="group relative border-b border-[var(--divider)]"
                         oncontextmenu={(e) => openMenu(e, n)}

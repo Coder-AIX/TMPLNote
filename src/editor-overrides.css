@@ -316,13 +316,13 @@
 
 /* 9.8.1 勾选态：覆盖 Fluent 默认蓝色，改用应用主题琥珀色。
         同时覆盖类名版 li.checked 与 data-list 版，二者使用同一套几何。
-        勾选图标使用深色 #1f2329，保证在黄色背景上的对比度；
-        浅色 / 深色模式下主题色与图标色保持一致。 */
+        勾选图标使用白色对勾，在主题色背景上清晰可见；
+        浅色 / 深色模式下主题色与白色对勾均保持一致。 */
 .ql-container.ql-snow .ql-editor li.checked > .ql-ui,
 .ql-container.ql-snow .ql-editor li[data-list='checked'] > .ql-ui {
     border: 1px solid var(--color-primary-600);
     background-color: var(--color-primary-500);
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpolyline points='2.6,11 6.9,15.2 17.4,4.8' fill='none' stroke='%231f2329' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpolyline points='2.6,11 6.9,15.2 17.4,4.8' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: center;
     background-size: 80% 80%;

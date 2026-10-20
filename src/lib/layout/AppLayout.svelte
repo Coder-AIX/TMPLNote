@@ -7,7 +7,7 @@
 
 <div class="flex h-dvh overflow-hidden bg-[var(--canvas)] text-[var(--fg)]">
     <Sidebar />
-    <div class="flex min-w-0 flex-1 flex-col lg:pl-[230px]">
+    <div class="flex min-w-0 flex-1 flex-col lg:pl-[280px]">
         <main class="min-h-0 flex-1 overflow-hidden">
             <Router {routes} />
         </main>
