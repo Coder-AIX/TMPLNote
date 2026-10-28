@@ -9,6 +9,7 @@
     import { maskStyle, secretInputType } from '../utils/secretInput.js';
     import TemplateSection from '../components/TemplateSection.svelte';
     import DataSection from '../components/DataSection.svelte';
+    import CloudSection from '../components/CloudSection.svelte';
     import AiSection from '../components/AiSection.svelte';
 
     let { params } = $props();
@@ -19,13 +20,14 @@
         { id: 'ai', label: 'AI', icon: 'sparkles' },
         { id: 'templates', label: '模板', icon: 'layout-template' },
         { id: 'data', label: '数据', icon: 'database' },
+        { id: 'cloud', label: '网盘', icon: 'cloud' },
         { id: 'about', label: '关于', icon: 'info' }
     ];
 
     const SECTION_IDS = SECTIONS.map((item) => item.id);
 
     /** 关于分区：主要能力列表 */
-    const CAPABILITIES = ['文件夹与笔记管理', '富文本编辑', '模板笔记', '本地 AI 对话（WebGPU / GGUF）'];
+    const CAPABILITIES = ['文件夹与笔记管理', '富文本编辑', '模板笔记', '本地 AI 对话（WebGPU / GGUF）', '百度网盘加密存档'];
 
     /** 当前分区 */
     let section = $state('system');
@@ -286,6 +288,8 @@
                     <TemplateSection />
                 {:else if section === 'data'}
                     <DataSection />
+                {:else if section === 'cloud'}
+                    <CloudSection />
                 {:else if section === 'ai'}
                     <AiSection />
                 {:else}

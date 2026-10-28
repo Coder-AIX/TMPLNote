@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { handleBridge } from './functions/_lib/bridge.js';
 
 /**
  * dev / preview 的跨域隔离头：
@@ -9,6 +10,73 @@ import { VitePWA } from 'vite-plugin-pwa';
  * - 其它浏览器使用 credentialless，避免拦截无 CORP 头的跨域图标。
  * 生产环境由 service-worker.js 按 UA 注入同样的头。
  */
+/**
+ * dev / preview 的百度网盘桥接中间件：
+ * 生产环境由 Cloudflare Pages Function 提供 /api/baidu，
+ * 本地开发时用同一份 handleBridge 逻辑，方便完整联调上传/下载。
+ */
+function baiduBridgeDev() {
+    /** @type {import('node:http').RequestListener} */
+    const middleware = async (req, res, next) => {
+        let pathname = '';
+        try {
+            pathname = new URL(req.url || '/', 'http://localhost').pathname;
+        } catch {
+            pathname = '';
+        }
+        if (pathname !== '/api/baidu') {
+            next();
+            return;
+        }
+
+        try {
+            const chunks = [];
+            for await (const chunk of req) chunks.push(chunk);
+            const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+
+            const headers = new Headers();
+            for (const [key, value] of Object.entries(req.headers)) {
+                if (value === undefined) continue;
+                if (Array.isArray(value)) headers.set(key, value.join(', '));
+                else headers.set(key, value);
+            }
+
+            const request = new Request(`http://${req.headers.host || 'localhost'}${req.url}`, {
+                method: req.method || 'GET',
+                headers,
+                body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body
+            });
+
+            const response = await handleBridge(request);
+            res.statusCode = response.status;
+            response.headers.forEach((value, key) => {
+                // 让 Node 自行计算长度，避免上游压缩后长度不一致。
+                if (key.toLowerCase() === 'content-length') return;
+                res.setHeader(key, value);
+            });
+            res.end(Buffer.from(await response.arrayBuffer()));
+        } catch (error) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json; charset=UTF-8');
+            res.end(
+                JSON.stringify({
+                    error: error?.message || '桥接服务内部错误。'
+                })
+            );
+        }
+    };
+
+    return {
+        name: 'baidu-bridge-dev',
+        configureServer(server) {
+            server.middlewares.use(middleware);
+        },
+        configurePreviewServer(server) {
+            server.middlewares.use(middleware);
+        }
+    };
+}
+
 function crossOriginIsolationHeaders() {
     /** @param {import('node:http').IncomingMessage} req */
     const pickCoep = (req) => {
@@ -42,6 +110,7 @@ const base = isCloudflarePages ? '/' : '/TMPLNote/';
 export default defineConfig({
     base,
     plugins: [
+        baiduBridgeDev(),
         crossOriginIsolationHeaders(),
         tailwindcss(),
         svelte(),

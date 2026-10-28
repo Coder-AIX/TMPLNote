@@ -27,6 +27,10 @@ export const DEFAULT_SETTINGS = {
     aiContextLength: 16384,      // 生效的上下文长度（token），范围 4096–51200；16384 是保证工具定义不被截断的下限；首次运行按设备推荐覆盖
     aiContextLengthPc: 16384,    // PC 推荐上下文长度；16384 是保证工具定义不被截断的下限
     aiContextLengthMobile: 16384, // 移动端推荐上下文长度；16384 是保证工具定义不被截断的下限（8192 会截断提示导致工具定义丢失）
+    baiduAccessToken: '',        // 百度网盘 access_token（仅保存在本机，不进入备份）
+    baiduAppPath: '/apps/TMPLNote', // 百度网盘应用目录，必须位于 /apps/{注册产品名} 下
+    baiduBridgeUrl: '/api/baidu', // 百度网盘同源桥接地址；GitHub Pages 可填外部 Worker 地址
+    baiduTokenSavedAt: 0         // access_token 最近一次验证保存时间（毫秒）
 };
 
 export const settingsRepository = {
