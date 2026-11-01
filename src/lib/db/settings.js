@@ -48,7 +48,13 @@ export const DEFAULT_SETTINGS = {
         lastRemoteName: '',      // 上次处理/上传的远端自动备份文件名（Phase 2）
         lastError: '',           // 最近一次失败原因（脱敏）
         authExpired: false,      // token 是否已失效
-        passphraseCheck: ''      // 口令校验值（Base64，非明文口令）
+        passphraseCheck: '',     // 口令校验值（Base64，非明文口令）
+        // 双向同步的三方合并基线：记录上次成功同步时各笔记/文件夹的 updatedAt。
+        // 用于判断「谁改过、谁被删除」，本身不包含口令、token 或任何密钥。
+        base: {
+            notes: {},           // noteId -> updatedAt
+            folders: {}          // folderId -> updatedAt
+        }
     }
 };
 

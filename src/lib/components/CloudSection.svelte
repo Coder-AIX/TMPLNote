@@ -7,7 +7,8 @@
      * - 列出云端 .tmplenc 存档；
      * - 上传前强制口令加密（完整备份 JSON）；
      * - 下载后解密并按合并 / 覆盖模式恢复；
-     * - 删除云端存档。
+     * - 删除云端存档；
+     * - 自动备份配置与状态；Phase 2 增加双向同步开关、冲突与上次同步展示。
      */
     import { Button, Heading, P, Label, Select, Modal } from 'flowbite-svelte';
     import Switch from './Switch.svelte';
@@ -114,12 +115,14 @@
     let deleting = $state(false);
     let deleteError = $state('');
 
-    /** ———— 自动同步与备份（Phase 1 仅自动备份） ———— */
+    /** ———— 自动同步与备份（Phase 1 自动备份 + Phase 2 双向同步） ———— */
     let autoConfigOpen = $state(false);
     let autoPassphrase = $state('');
     let autoConfirm = $state('');
     let autoShowPassphrase = $state(false);
     let autoSavePassphrase = $state(true);
+    // 配置弹窗中的双向同步开关（打开弹窗时取当前配置值）
+    let autoSyncEnabled = $state(false);
     let autoIntervalValue = $state('30');
     let autoKeepCountValue = $state('7');
     let autoConfigError = $state('');
@@ -132,10 +135,18 @@
     let autoUnlockShow = $state(false);
     let autoUnlockError = $state('');
     let autoUnlocking = $state(false);
+    // 已启用状态卡中的双向同步开关镜像与保存中状态
+    let autoSyncToggle = $state(false);
+    let autoSyncSaving = $state(false);
 
     // 仅在 store 中的值真正变化时同步本地镜像，避免覆盖用户刚选中、尚未保存的值
     let syncedAutoInterval = -1;
     let syncedAutoKeepCount = -1;
+
+    // 双向同步开关始终跟随 store 中的真实配置，避免保存失败后停留在错误状态
+    $effect(() => {
+        autoSyncToggle = Boolean($baiduAutoState.syncEnabled);
+    });
 
     $effect(() => {
         const state = $baiduAutoState;
@@ -195,7 +206,36 @@
     );
 
     /** 自动运行阶段文案 */
-    let autoProgressLabel = $derived($baiduAutoState.progressText || '正在备份…');
+    let autoProgressLabel = $derived(
+        $baiduAutoState.progressText ||
+            ($baiduAutoState.syncEnabled ? '正在同步…' : '正在备份…')
+    );
+
+    /** 自动功能状态卡标题：启用双向同步后改为「自动同步与备份已启用」 */
+    let autoStatusTitle = $derived(
+        $baiduAutoState.syncEnabled ? '自动同步与备份已启用' : '自动备份已启用'
+    );
+
+    /** 上次双向同步时间 */
+    let lastSyncLabel = $derived(
+        $baiduAutoState.lastSyncAt ? formatTimestamp($baiduAutoState.lastSyncAt) : '尚未同步'
+    );
+
+    /** 当前同步模式 */
+    let syncModeLabel = $derived($baiduAutoState.syncEnabled ? '双向同步' : '仅备份');
+
+    /** 冲突数量（仅展示，不参与合并逻辑） */
+    let autoConflictCount = $derived($baiduAutoState.conflicts?.length || 0);
+
+    /** 冲突标题预览：最多展示前 3 个 */
+    let autoConflictPreview = $derived(($baiduAutoState.conflicts || []).slice(0, 3));
+
+    /** 立即同步 / 立即备份按钮文案 */
+    let autoRunButtonLabel = $derived.by(() => {
+        const sync = $baiduAutoState.syncEnabled;
+        if (autoRunning || $baiduAutoState.busy) return sync ? '同步中…' : '备份中…';
+        return sync ? '立即同步' : '立即备份';
+    });
 
     /** 上传按钮文案（含分片进度） */
     let uploadButtonText = $derived.by(() => {
@@ -248,6 +288,7 @@
         autoConfirm = '';
         autoShowPassphrase = false;
         autoSavePassphrase = true;
+        autoSyncEnabled = Boolean($baiduAutoState.syncEnabled);
         autoIntervalValue = String($baiduAutoState.intervalMinutes || 30);
         autoKeepCountValue = String($baiduAutoState.keepCount || 7);
         autoConfigOpen = true;
@@ -279,6 +320,7 @@
                 passphrase: useStored ? undefined : autoPassphrase,
                 savePassphrase: autoSavePassphrase,
                 backupEnabled: true,
+                syncEnabled: autoSyncEnabled,
                 intervalMinutes: Number(autoIntervalValue),
                 keepCount: Number(autoKeepCountValue)
             });
@@ -289,7 +331,7 @@
             autoActionError = '';
             autoUnlockError = '';
             error = '';
-            message = '自动备份已启用。';
+            message = autoSyncEnabled ? '自动同步与备份已启用。' : '自动备份已启用。';
         } catch (e) {
             autoConfigError = e?.message || '启用自动备份失败，请稍后重试。';
         } finally {
@@ -317,19 +359,53 @@
         }
     }
 
-    /** 立即执行一次自动备份（强制上传） */
+    /** 立即执行一次自动备份或双向同步（强制上传） */
     async function runAutoNow() {
         autoActionError = '';
         autoRunning = true;
+        const sync = $baiduAutoState.syncEnabled;
         try {
             await runAutoSyncNow();
             error = '';
-            message = '自动备份已完成。';
+            message = sync ? '双向同步已完成。' : '自动备份已完成。';
             await refreshArchives({ silent: true });
         } catch (e) {
-            autoActionError = e?.message || '自动备份失败，请稍后重试。';
+            autoActionError = e?.message || (sync ? '同步失败，请稍后重试。' : '自动备份失败，请稍后重试。');
         } finally {
             autoRunning = false;
+        }
+    }
+
+    /**
+     * 已启用状态下切换双向同步。
+     * 开启前必须二次确认；用户取消或保存失败时把开关回退到 store 中的真实配置。
+     */
+    async function onAutoSyncToggle(checked) {
+        autoActionError = '';
+        if (checked) {
+            const confirmed =
+                typeof window === 'undefined'
+                    ? true
+                    : window.confirm(
+                          '开启双向同步后，会下载云端最新自动备份并与本机合并；删除会传播，冲突会保存为副本。确定开启？'
+                      );
+            if (!confirmed) {
+                autoSyncToggle = Boolean($baiduAutoState.syncEnabled);
+                return;
+            }
+        }
+
+        autoSyncToggle = checked;
+        autoSyncSaving = true;
+        try {
+            await saveAutoOptions({ syncEnabled: checked });
+            error = '';
+            message = checked ? '已开启双向同步。' : '已关闭双向同步，恢复为仅备份。';
+        } catch (e) {
+            autoSyncToggle = Boolean($baiduAutoState.syncEnabled);
+            autoActionError = e?.message || '保存双向同步设置失败。';
+        } finally {
+            autoSyncSaving = false;
         }
     }
 
@@ -809,7 +885,7 @@
         <P size="sm" class="text-[var(--fg-muted)]">{message}</P>
     {/if}
 
-    <!-- 自动同步与备份（Phase 1 仅自动备份，不显示双向同步开关） -->
+    <!-- 自动同步与备份（Phase 1 自动备份 + Phase 2 双向同步） -->
     <div class="flex flex-col gap-3 border-t border-[var(--divider)] pt-4">
         <div class="flex flex-col gap-1">
             <Label class="text-[15px] text-[var(--fg)]">自动同步与备份</Label>
@@ -857,18 +933,26 @@
             <div class="flex flex-col gap-3 rounded-lg border border-[var(--divider)] p-3">
                 <div class="flex items-center gap-2">
                     <ha-icon
-                        name="rotate-ccw"
+                        name={$baiduAutoState.syncEnabled ? 'history' : 'rotate-ccw'}
                         collection="lucide"
                         size="18"
                         class="shrink-0 text-primary-500"
                     ></ha-icon>
-                    <span class="text-sm font-medium text-[var(--fg)]">自动备份已启用</span>
+                    <span class="text-sm font-medium text-[var(--fg)]">{autoStatusTitle}</span>
                 </div>
 
                 <dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
                     <div class="flex flex-col gap-0.5">
                         <dt class="text-xs text-[var(--fg-subtle)]">上次备份</dt>
                         <dd class="text-[var(--fg-muted)]">{lastBackupLabel}</dd>
+                    </div>
+                    <div class="flex flex-col gap-0.5">
+                        <dt class="text-xs text-[var(--fg-subtle)]">上次同步</dt>
+                        <dd class="text-[var(--fg-muted)]">{lastSyncLabel}</dd>
+                    </div>
+                    <div class="flex flex-col gap-0.5">
+                        <dt class="text-xs text-[var(--fg-subtle)]">同步模式</dt>
+                        <dd class="text-[var(--fg-muted)]">{syncModeLabel}</dd>
                     </div>
                     <div class="flex flex-col gap-0.5">
                         <dt class="text-xs text-[var(--fg-subtle)]">下次计划</dt>
@@ -885,6 +969,41 @@
                         </dd>
                     </div>
                 </dl>
+
+                <div
+                    class="flex items-center justify-between gap-3 rounded-lg bg-[var(--field)] px-3 py-2.5"
+                >
+                    <div class="flex min-w-0 flex-col gap-0.5">
+                        <span class="text-sm text-[var(--fg)]">双向同步（多设备）</span>
+                        <span class="text-xs text-[var(--fg-subtle)]">
+                            会下载云端最新自动备份并与本机合并；删除会传播，冲突会保存为副本。
+                        </span>
+                    </div>
+                    <Switch
+                        checked={autoSyncToggle}
+                        disabled={$baiduAutoState.busy || autoSyncSaving}
+                        ariaLabel="双向同步（多设备）"
+                        onchange={onAutoSyncToggle}
+                    />
+                </div>
+
+                {#if autoConflictCount > 0}
+                    <div class="flex flex-col gap-1.5 rounded-lg bg-[var(--field)] p-3">
+                        <P size="sm" class="text-[var(--fg)]">
+                            检测到 {autoConflictCount} 个冲突，已保存为副本。
+                        </P>
+                        <ul class="flex flex-col gap-0.5 text-xs text-[var(--fg-muted)]">
+                            {#each autoConflictPreview as conflict (conflict.id)}
+                                <li class="truncate">· {conflict.title}</li>
+                            {/each}
+                        </ul>
+                        {#if autoConflictCount > autoConflictPreview.length}
+                            <P size="sm" class="text-[var(--fg-subtle)]">
+                                仅显示前 3 个冲突，可在笔记列表查看全部冲突副本。
+                            </P>
+                        {/if}
+                    </div>
+                {/if}
 
                 {#if $baiduAutoState.authExpired}
                     <P size="sm" class="text-red-500" role="alert">
@@ -958,10 +1077,12 @@
                         onclick={runAutoNow}
                         disabled={$baiduAutoState.busy || autoRunning}
                     >
-                        <ha-icon name="upload" collection="lucide" size="18"></ha-icon>
-                        <span>
-                            {autoRunning || $baiduAutoState.busy ? '备份中…' : '立即备份'}
-                        </span>
+                        <ha-icon
+                            name={$baiduAutoState.syncEnabled ? 'history' : 'upload'}
+                            collection="lucide"
+                            size="18"
+                        ></ha-icon>
+                        <span>{autoRunButtonLabel}</span>
                     </button>
                     <button
                         type="button"
@@ -1434,6 +1555,21 @@
                     关闭后，每次打开应用需要手动解锁自动同步。
                 </P>
             {/if}
+        </div>
+
+        <div class="flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-[15px] text-[var(--fg)]">双向同步（多设备）</span>
+                <Switch
+                    checked={autoSyncEnabled}
+                    ariaLabel="双向同步（多设备）"
+                    disabled={autoEnabling}
+                    onchange={(checked) => (autoSyncEnabled = checked)}
+                />
+            </div>
+            <P size="sm" class="text-[var(--fg-subtle)]">
+                开启后会下载云端最新自动备份并与本机合并；删除会传播，冲突会保存为副本。首次开启前请确认云端备份属于同一份笔记。
+            </P>
         </div>
 
         <div class="flex flex-col gap-1.5">

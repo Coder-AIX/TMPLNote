@@ -8,15 +8,17 @@
  * - 口令只能在模块内存（会话）与 secrets 加密记录中出现，绝不能进入 settings、
  *   baiduAutoState 或日志。
  *
- * Phase 1 只执行自动备份（runAutoBackup），不调用 Phase 2 的双向同步引擎。
+ * Phase 2 起：syncEnabled 为 true 时执行双向同步（runAutoSync），
+ * 否则保持 Phase 1 的自动备份（runAutoBackup）。
  */
 import { writable, get } from 'svelte/store';
 import { settings, settingsReady, updateSetting } from './settings.js';
 import { DEFAULT_SETTINGS } from '../db/settings.js';
 import { locked } from './security.js';
-import { notesVersion, foldersVersion } from './workspace.js';
+import { notesVersion, foldersVersion, bumpNotes, bumpFolders } from './workspace.js';
 import { verifyToken } from '../baidu/client.js';
 import { runAutoBackup, computeLocalFingerprint } from '../baidu/autoBackup.js';
+import { runAutoSync } from '../baidu/syncEngine.js';
 import { assertPassword } from '../baidu/archiveCrypto.js';
 import {
     saveAutoPassphrase,
@@ -105,6 +107,13 @@ let retryNotBefore = 0;
 
 /** 单飞：进行中的运行 Promise */
 let inflight = null;
+
+/**
+ * 是否正在把同步结果写回本地列表。
+ * 同步引擎写库后会由 store 调用 bumpNotes/bumpFolders，
+ * 由此触发的数据变化订阅必须被忽略，避免「同步 → bump → 再次同步」的死循环。
+ */
+let applying = false;
 
 /** 调度器是否已注册（防重复监听 / 防 HMR 重复注册） */
 let schedulerStarted = false;
@@ -329,8 +338,8 @@ function buildSettingsPatch(auto, current) {
         configured: Boolean(current.baiduAccessToken && current.baiduAppPath),
         enabled: Boolean(auto.enabled),
         backupEnabled: auto.backupEnabled !== false,
-        // Phase 1 强制关闭双向同步，只保留字段供 Phase 2 使用
-        syncEnabled: false,
+        // Phase 2：双向同步开关真正生效
+        syncEnabled: Boolean(auto.syncEnabled),
         intervalMinutes: normalizeInterval(auto.intervalMinutes),
         keepCount: normalizeKeepCount(auto.keepCount),
         lastBackupAt: Number(auto.lastBackupAt) || 0,
@@ -424,6 +433,9 @@ function markUserInput() {
  * 本地数据变化后做 90 秒防抖。
  */
 function onDataChanged() {
+    // 同步写库后主动刷新列表时，忽略由此产生的数据变化，避免自动同步循环
+    if (applying) return;
+
     const snapshot = get(baiduAutoState);
     if (!snapshot.enabled) return;
     setNextRun(Date.now() + CHANGE_DEBOUNCE_MS);
@@ -480,9 +492,17 @@ function startScheduler() {
         const configured = Boolean(value.baiduAccessToken && value.baiduAppPath);
         const enabled = Boolean(auto.enabled);
         const backupEnabled = auto.backupEnabled !== false;
+        const syncEnabled = Boolean(auto.syncEnabled);
         const intervalMinutes = normalizeInterval(auto.intervalMinutes);
         const keepCount = normalizeKeepCount(auto.keepCount);
-        const signature = [configured, enabled, backupEnabled, intervalMinutes, keepCount].join('|');
+        const signature = [
+            configured,
+            enabled,
+            backupEnabled,
+            syncEnabled,
+            intervalMinutes,
+            keepCount
+        ].join('|');
 
         if (firstSettings) {
             firstSettings = false;
@@ -497,7 +517,7 @@ function startScheduler() {
             configured,
             enabled,
             backupEnabled,
-            syncEnabled: false,
+            syncEnabled,
             intervalMinutes,
             keepCount
         });
@@ -547,7 +567,15 @@ function applyProgress(progress) {
     const detail = typeof progress?.message === 'string' ? progress.message : '';
 
     let progressText = '';
-    if (phase === 'fingerprint') {
+    if (phase === 'list') {
+        progressText = '正在检查云端备份…';
+    } else if (phase === 'download') {
+        progressText = '正在下载云端备份…';
+    } else if (phase === 'merge') {
+        progressText = '正在合并云端与本地…';
+    } else if (phase === 'apply') {
+        progressText = '正在写入合并结果…';
+    } else if (phase === 'fingerprint') {
         progressText = '正在计算数据指纹…';
     } else if (phase === 'encrypt') {
         progressText = '正在加密本地数据…';
@@ -562,10 +590,10 @@ function applyProgress(progress) {
     } else if (phase === 'prune') {
         progressText = '正在清理旧自动备份…';
     } else if (phase === 'sync') {
-        // Phase 2 预留阶段，Phase 1 不会出现
+        // 预留阶段，当前由 list/download/merge/apply 细分
         progressText = '正在同步…';
     } else if (phase === 'done') {
-        progressText = '备份完成';
+        progressText = '完成';
     }
 
     if (phase || progressText) {
@@ -654,6 +682,108 @@ async function executeAuto({ manual, force }) {
     });
 
     try {
+        // 双向同步：由引擎判断远端是否变化，因此不做「本地指纹未变就跳过」的预判
+        if (auto.syncEnabled === true) {
+            const result = await runAutoSync({
+                token,
+                bridgeUrl,
+                appPath,
+                passphrase: sessionPassphrase,
+                config: auto,
+                onProgress: applyProgress,
+                now: Date.now()
+            });
+
+            if (result && result.status === 'skipped') {
+                // 云端与本地都没有变化：只清理错误状态，不更新同步基线
+                const skippedAt = Date.now();
+                const skippedConfig =
+                    result.nextConfig && typeof result.nextConfig === 'object'
+                        ? result.nextConfig
+                        : auto;
+                try {
+                    await updateSetting('baiduAuto', {
+                        ...mergeAuto(get(settings).baiduAuto),
+                        lastError: '',
+                        authExpired: false
+                    });
+                } catch {
+                    // 持久化失败不影响已完成的跳过判断
+                }
+
+                lastAutoAt = skippedAt;
+                retryNotBefore = 0;
+                patchState({
+                    busy: false,
+                    phase: '',
+                    progressText: '云端无变化，已跳过',
+                    lastSyncAt: Number(skippedConfig.lastSyncAt) || 0,
+                    lastBackupAt: Number(skippedConfig.lastBackupAt) || 0,
+                    lastBackupName:
+                        typeof skippedConfig.lastBackupName === 'string'
+                            ? skippedConfig.lastBackupName
+                            : '',
+                    lastError: '',
+                    authExpired: false,
+                    conflicts: Array.isArray(result.conflicts) ? result.conflicts : [],
+                    syncEnabled: true,
+                    intervalMinutes: normalizeInterval(skippedConfig.intervalMinutes),
+                    keepCount: normalizeKeepCount(skippedConfig.keepCount)
+                });
+                setNextRun(skippedAt + normalizeInterval(skippedConfig.intervalMinutes) * 60 * 1000);
+
+                return { status: 'skipped', reason: 'unchanged' };
+            }
+
+            if (result && result.status === 'synced') {
+                // 整体持久化引擎返回的新配置（含 base / lastRemoteName / 指纹等基线）
+                const latestAuto = mergeAuto(get(settings).baiduAuto);
+                const nextAuto = {
+                    ...latestAuto,
+                    ...(result.nextConfig && typeof result.nextConfig === 'object'
+                        ? result.nextConfig
+                        : {})
+                };
+                await updateSetting('baiduAuto', nextAuto);
+
+                // 仅当确有远端数据写入本地时才刷新列表；刷新期间忽略数据变化订阅
+                if (result.applied === true) {
+                    applying = true;
+                    bumpNotes();
+                    bumpFolders();
+                    applying = false;
+                }
+
+                const finishedAt = Date.now();
+                const intervalMinutes = normalizeInterval(nextAuto.intervalMinutes);
+                lastAutoAt = finishedAt;
+                retryNotBefore = 0;
+                patchState({
+                    busy: false,
+                    phase: 'done',
+                    progressText: '同步完成',
+                    lastSyncAt: Number(nextAuto.lastSyncAt) || 0,
+                    lastBackupAt: Number(nextAuto.lastBackupAt) || 0,
+                    lastBackupName:
+                        typeof nextAuto.lastBackupName === 'string'
+                            ? nextAuto.lastBackupName
+                            : '',
+                    lastError: '',
+                    authExpired: false,
+                    conflicts: Array.isArray(result.conflicts) ? result.conflicts : [],
+                    intervalMinutes,
+                    keepCount: normalizeKeepCount(nextAuto.keepCount),
+                    syncEnabled: nextAuto.syncEnabled === true
+                });
+                setNextRun(finishedAt + intervalMinutes * 60 * 1000);
+
+                return { status: 'synced', result };
+            }
+
+            // 引擎返回未知状态时不再回退到备份模式，避免一次运行写两次云端
+            throw new Error('双向同步返回了未知结果，请稍后重试。');
+        }
+
         // 自动备份且未启用双向同步时，先判断指纹是否变化；手动运行强制上传
         if (!manual && auto.backupEnabled && !auto.syncEnabled) {
             const fingerprint = await computeLocalFingerprint();
@@ -701,6 +831,8 @@ async function executeAuto({ manual, force }) {
             lastBackupName: result.filename,
             lastError: '',
             authExpired: false,
+            // 纯备份模式没有同步冲突
+            conflicts: [],
             intervalMinutes: normalizeInterval(nextAuto.intervalMinutes),
             keepCount: normalizeKeepCount(nextAuto.keepCount)
         });
@@ -708,6 +840,14 @@ async function executeAuto({ manual, force }) {
 
         return { status: 'done', result };
     } catch (error) {
+        // 同步引擎可能已经写库、仅在上传阶段失败：刷新列表避免 UI 显示旧数据
+        if (auto.syncEnabled === true) {
+            applying = true;
+            bumpNotes();
+            bumpFolders();
+            applying = false;
+        }
+
         const classified = classifyAutoError(error, token);
         const failedAt = Date.now();
         lastAutoAt = failedAt;
@@ -911,13 +1051,15 @@ export async function enableAutoSync(options = {}) {
     const intervalMinutes = normalizeInterval(options.intervalMinutes ?? auto.intervalMinutes);
     const keepCount = normalizeKeepCount(options.keepCount ?? auto.keepCount);
     const backupEnabled = options.backupEnabled !== false;
+    // 双向同步：显式 true 才开启；未提供时沿用现有配置
+    const syncEnabled =
+        typeof options.syncEnabled === 'boolean' ? options.syncEnabled : auto.syncEnabled === true;
 
     const nextAuto = {
         ...auto,
         enabled: true,
         backupEnabled,
-        // Phase 1 固定关闭双向同步，忽略传入值
-        syncEnabled: false,
+        syncEnabled,
         intervalMinutes,
         keepCount,
         deviceId,
@@ -975,9 +1117,9 @@ export async function disableAutoSync() {
 }
 
 /**
- * 修改自动备份选项。
- * Phase 1 只接受 backupEnabled / syncEnabled / intervalMinutes / keepCount；
- * syncEnabled 保留字段但强制 false，不产生任何同步行为。
+ * 修改自动同步/备份选项。
+ * 接受 backupEnabled / syncEnabled / intervalMinutes / keepCount。
+ * Phase 2 起 syncEnabled 真正生效：开启后自动运行会走双向同步引擎。
  *
  * @param {{backupEnabled?: boolean, syncEnabled?: boolean, intervalMinutes?: number, keepCount?: number}} [options]
  * @returns {Promise<object>} 持久化后的 baiduAuto 对象
@@ -986,12 +1128,15 @@ export async function saveAutoOptions(options = {}) {
     await settingsReady;
     const auto = mergeAuto(get(settings).baiduAuto);
     const nextAuto = { ...auto };
+    // 记录本次是否从「未开启」切换为「开启」，用于尽快安排首次同步
+    const wasSyncEnabled = auto.syncEnabled === true;
 
     if (typeof options.backupEnabled === 'boolean') {
         nextAuto.backupEnabled = options.backupEnabled;
     }
-    // Phase 1 强制关闭双向同步
-    nextAuto.syncEnabled = false;
+    if (typeof options.syncEnabled === 'boolean') {
+        nextAuto.syncEnabled = options.syncEnabled;
+    }
     nextAuto.intervalMinutes = normalizeInterval(
         options.intervalMinutes === undefined ? auto.intervalMinutes : options.intervalMinutes
     );
@@ -1003,13 +1148,18 @@ export async function saveAutoOptions(options = {}) {
 
     patchState({
         backupEnabled: nextAuto.backupEnabled !== false,
-        syncEnabled: false,
+        syncEnabled: nextAuto.syncEnabled === true,
         intervalMinutes: nextAuto.intervalMinutes,
         keepCount: nextAuto.keepCount
     });
 
     if (get(baiduAutoState).enabled) {
-        setNextRun(Date.now() + nextAuto.intervalMinutes * 60 * 1000);
+        if (!wasSyncEnabled && nextAuto.syncEnabled === true) {
+            // 刚开启双向同步：尽快让用户看到首次同步结果
+            setNextRun(Date.now() + 3000);
+        } else {
+            setNextRun(Date.now() + nextAuto.intervalMinutes * 60 * 1000);
+        }
     } else {
         setNextRun(0);
     }
