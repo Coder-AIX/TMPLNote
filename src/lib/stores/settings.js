@@ -95,9 +95,13 @@ export const settingsReady = new Promise((resolve) => {
 });
 
 if (typeof document !== 'undefined') {
-    // 应用主题类名
+    // 应用主题类名，并同步浏览器/PWA 顶部栏颜色与 color-scheme
+    // （与 index.html 首绘脚本保持一致：顶部栏取卡片表面色 --card）
     resolvedDark.subscribe((dark) => {
         document.documentElement.classList.toggle('dark', dark);
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        const themeMeta = document.querySelector('meta[name="theme-color"]');
+        if (themeMeta) themeMeta.setAttribute('content', dark ? '#1f2937' : '#ffffff');
     });
     // 写入镜像（仅主题相关字段）
     settings.subscribe((value) => {
