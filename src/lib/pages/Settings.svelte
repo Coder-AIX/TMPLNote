@@ -11,6 +11,7 @@
     import DataSection from '../components/DataSection.svelte';
     import CloudSection from '../components/CloudSection.svelte';
     import AiSection from '../components/AiSection.svelte';
+    import { checkForAppUpdate, applyAppUpdate } from '../utils/appUpdate.js';
 
     let { params } = $props();
 
@@ -28,6 +29,39 @@
 
     /** 关于分区：主要能力列表 */
     const CAPABILITIES = ['文件夹与笔记管理', '富文本编辑', '模板笔记', '本地 AI 对话（WebGPU / GGUF）', '百度网盘加密存档'];
+
+    /** 手动检查更新：检查 Service Worker 新版本并按需刷新页面 */
+    let updateChecking = $state(false);
+    let updateMessage = $state('');
+    let updateError = $state('');
+
+    async function handleCheckUpdate() {
+        if (updateChecking) return;
+        updateChecking = true;
+        updateMessage = '';
+        updateError = '';
+        try {
+            const result = await checkForAppUpdate();
+            if (result.status === 'updated') {
+                updateMessage = '发现新版本，正在更新…';
+                applyAppUpdate(result.registration);
+                return;
+            }
+            if (result.status === 'unsupported') {
+                updateMessage = '当前环境不支持自动更新，正在刷新页面…';
+                setTimeout(() => window.location.reload(), 600);
+                return;
+            }
+            updateMessage = '已是最新版本。';
+        } catch (e) {
+            updateError =
+                typeof navigator !== 'undefined' && navigator.onLine === false
+                    ? '当前处于离线状态，无法检查更新。'
+                    : '检查更新失败，请稍后重试。';
+        } finally {
+            updateChecking = false;
+        }
+    }
 
     /** 当前分区 */
     let section = $state('system');
@@ -324,6 +358,30 @@
                                     </li>
                                 {/each}
                             </ul>
+                        </div>
+
+                        <div class="flex flex-col gap-2 rounded-lg border border-[var(--divider)] p-3">
+                            <div class="flex flex-col gap-0.5">
+                                <span class="text-sm font-medium text-[var(--fg)]">应用更新</span>
+                                <P size="sm" class="text-[var(--fg-muted)]">
+                                    检查是否有新版本；安装版会更新缓存并重新加载页面。
+                                </P>
+                            </div>
+                            <button
+                                type="button"
+                                class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                                onclick={handleCheckUpdate}
+                                disabled={updateChecking}
+                            >
+                                <ha-icon name="rotate-ccw" collection="lucide" size="18"></ha-icon>
+                                <span>{updateChecking ? '检查中…' : '检查更新'}</span>
+                            </button>
+                            {#if updateMessage}
+                                <P size="sm" class="text-[var(--fg-muted)]">{updateMessage}</P>
+                            {/if}
+                            {#if updateError}
+                                <P size="sm" class="text-red-500" role="alert">{updateError}</P>
+                            {/if}
                         </div>
 
                         <div
