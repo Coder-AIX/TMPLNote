@@ -28,7 +28,7 @@
     const SECTION_IDS = SECTIONS.map((item) => item.id);
 
     /** 关于分区：主要能力列表 */
-    const CAPABILITIES = ['文件夹与笔记管理', '富文本编辑', '模板笔记', '本地 AI 对话（WebGPU / GGUF）', '百度网盘加密存档'];
+    const CAPABILITIES = ['文件夹与笔记管理', '富文本编辑', '模板笔记', '本地 AI 对话（WebGPU / GGUF）', '百度网盘加密自动备份与双向同步'];
 
     /** 手动检查更新：检查 Service Worker 新版本并按需刷新页面 */
     let updateChecking = $state(false);
