@@ -37,6 +37,7 @@ const ARCHIVE_EXTENSION = '.tmplenc';
  * 未收录的错误码会回退为通用提示，并保留百度原始 errmsg。
  */
 const ERROR_MESSAGES = {
+    '12': '部分云端文件删除失败。',
     '-10': '网盘容量不足，无法创建云端文件。',
     '-7': '应用目录不存在或当前 token 无权限访问。',
     '-6': 'access_token 无效或已过期，请重新获取并粘贴。',
@@ -184,6 +185,69 @@ async function requestJson(target, options) {
     const errno = Number(rawErrno ?? 0);
 
     if (Number.isFinite(errno) && errno !== 0) {
+        let detail = String(data.errmsg || data.show_msg || data.error_msg || '');
+        if (!ERROR_MESSAGES[String(errno)] && data.request_id) {
+            detail = `${detail}${detail ? '，' : ''}request_id=${data.request_id}`;
+        }
+        throw createBaiduError(errno, detail);
+    }
+
+    return data;
+}
+
+/**
+ * 读取并校验百度 JSON 响应，但允许顶层 errno=12（批量部分失败）通过。
+ *
+ * 为什么单独实现：filemanager 是批量接口，顶层 errno=12 时仍需读取 info
+ * 数组逐项判定；若直接走 requestJson，顶层非 0 会提前抛错并丢掉逐项信息。
+ * 其余错误处理与 requestJson 保持一致，最终文案沿用现有错误码映射。
+ */
+async function requestJsonAllowingPartial(target, options) {
+    const response = await bridgeFetch(target, options);
+    const text = await response.text();
+    const data = tryParseJson(text);
+
+    if (!response.ok) {
+        if (data && typeof data.error === 'string') {
+            const error = new Error(data.error);
+            error.status = response.status;
+            throw error;
+        }
+        const rawErrno = data ? Number(data.errno ?? data.error_code) : NaN;
+        if (Number.isFinite(rawErrno) && rawErrno !== 0) {
+            throw createBaiduError(
+                rawErrno,
+                String(data.errmsg || data.show_msg || data.error_msg || '')
+            );
+        }
+        const contentType = String(response.headers.get('content-type') || '');
+        if (contentType.includes('text/html') || text.trimStart().startsWith('<')) {
+            const error = new Error(
+                '桥接服务未正确部署（返回了网页而不是接口数据）。请检查 /api/baidu 或设置中的桥接地址。'
+            );
+            error.status = response.status;
+            throw error;
+        }
+        const error = new Error(`百度网盘服务返回 HTTP ${response.status}。`);
+        error.status = response.status;
+        throw error;
+    }
+
+    if (!data || typeof data !== 'object') {
+        const contentType = String(response.headers.get('content-type') || '');
+        if (contentType.includes('text/html') || text.trimStart().startsWith('<')) {
+            throw new Error(
+                '桥接服务未正确部署（返回了网页而不是接口数据）。请检查 /api/baidu 或设置中的桥接地址。'
+            );
+        }
+        throw new Error('百度网盘返回了无法解析的响应。');
+    }
+
+    const rawErrno = data.errno !== undefined ? data.errno : data.error_code;
+    const errno = Number(rawErrno ?? 0);
+
+    // 顶层 12 是「部分失败」，需保留 info 交给调用方逐项判定，不能在此吞掉
+    if (Number.isFinite(errno) && errno !== 0 && errno !== 12) {
         let detail = String(data.errmsg || data.show_msg || data.error_msg || '');
         if (!ERROR_MESSAGES[String(errno)] && data.request_id) {
             detail = `${detail}${detail ? '，' : ''}request_id=${data.request_id}`;
@@ -581,6 +645,10 @@ export async function uploadArchive({
 /**
  * 删除云端存档。
  *
+ * xpan 文件接口没有 method=delete，删除要走「文件管理」批量操作接口：
+ * method=filemanager&opera=delete，filelist 必须是对象数组 [{ path }]，
+ * 传字符串数组会被百度判定为 param error（31023）。
+ *
  * @param {{token: string, bridgeUrl?: string, path: string}} options
  * @returns {Promise<object>} 百度响应。
  */
@@ -589,15 +657,35 @@ export async function deleteArchive({ token, bridgeUrl, path }) {
     if (!target) {
         throw new Error('缺少要删除的云端文件路径。');
     }
-    const body = new URLSearchParams({ filelist: JSON.stringify([target]) });
 
-    return requestJson(`${PAN_HOST}/rest/2.0/xpan/file?method=delete&async=0`, {
-        token,
-        bridgeUrl,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-        body
-    });
+    const data = await requestJsonAllowingPartial(
+        `${PAN_HOST}/rest/2.0/xpan/file?method=filemanager&opera=delete&async=0`,
+        {
+            token,
+            bridgeUrl,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+            body: new URLSearchParams({ filelist: JSON.stringify([{ path: target }]) })
+        }
+    );
+
+    const info = Array.isArray(data.info) ? data.info : [];
+
+    // 顶层 errno=12 只表示「部分失败」，必须逐项确认；顶层 0 也一并校验，
+    // 因为批量接口可能顶层成功而单项失败。
+    for (const item of info) {
+        const itemErrno = Number(item?.errno ?? 0);
+        if (itemErrno === 0) continue;
+        // -9：文件不存在。删除是幂等操作，列表可能已过期，按成功处理。
+        if (itemErrno === -9) continue;
+
+        const itemPath = String(item?.path || target);
+        // 复用错误码映射生成可操作的中文原因，再补上具体路径
+        const reason = createBaiduError(itemErrno).message.replace(/[。.]$/, '');
+        throw new Error(`删除云端文件失败：${itemPath}（errno ${itemErrno}，${reason}）`);
+    }
+
+    return data;
 }
 
 export default {
