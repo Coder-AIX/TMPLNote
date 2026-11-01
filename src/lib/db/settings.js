@@ -30,7 +30,26 @@ export const DEFAULT_SETTINGS = {
     baiduAccessToken: '',        // 百度网盘 access_token（仅保存在本机，不进入备份）
     baiduAppPath: '/apps/TMPLNote', // 百度网盘应用目录，必须位于 /apps/{注册产品名} 下
     baiduBridgeUrl: '/api/baidu', // 百度网盘同源桥接地址；GitHub Pages 可填外部 Worker 地址
-    baiduTokenSavedAt: 0         // access_token 最近一次验证保存时间（毫秒）
+    baiduTokenSavedAt: 0,        // access_token 最近一次验证保存时间（毫秒）
+    // 百度网盘自动同步/备份配置。
+    // 注意：加密口令本身不存这里（存于 secrets 仓库的设备级密文记录），此处仅保存状态与校验值，避免明文泄露。
+    // 读取时须与本默认对象合并，防止旧数据缺字段（见 stores/baiduAuto.js）。
+    baiduAuto: {
+        enabled: false,          // 自动同步/备份总开关
+        backupEnabled: true,     // 自动上传备份（Phase 1）
+        syncEnabled: false,      // 双向同步（Phase 2；Phase 1 不使用 UI）
+        intervalMinutes: 30,     // 自动周期（分钟）：15 / 30 / 60 / 180 / 1440
+        keepCount: 7,            // 自动备份保留份数：1–100
+        deviceId: '',            // 设备标识，首次启用时生成 crypto.randomUUID()
+        lastBackupAt: 0,         // 上次成功自动备份时间（毫秒）
+        lastBackupName: '',      // 上次成功自动备份文件名
+        lastFingerprint: '',     // 上次成功备份时的数据指纹
+        lastSyncAt: 0,           // 上次成功双向同步时间（Phase 2）
+        lastRemoteName: '',      // 上次处理/上传的远端自动备份文件名（Phase 2）
+        lastError: '',           // 最近一次失败原因（脱敏）
+        authExpired: false,      // token 是否已失效
+        passphraseCheck: ''      // 口令校验值（Base64，非明文口令）
+    }
 };
 
 export const settingsRepository = {

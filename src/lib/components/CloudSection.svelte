@@ -10,6 +10,7 @@
      * - 删除云端存档。
      */
     import { Button, Heading, P, Label, Select, Modal } from 'flowbite-svelte';
+    import Switch from './Switch.svelte';
     import backupRepository from '../db/backup.js';
     import { stringifyBackup, parseBackup } from '../utils/backup.js';
     import { settings, updateSetting, loadSettings } from '../stores/settings.js';
@@ -32,6 +33,15 @@
         uploadArchive,
         deleteArchive
     } from '../baidu/client.js';
+    import {
+        baiduAutoState,
+        enableAutoSync,
+        disableAutoSync,
+        saveAutoOptions,
+        unlockAutoSync,
+        runAutoSyncNow,
+        clearStoredAutoPassphrase
+    } from '../stores/baiduAuto.js';
 
     const INPUT_CLASS =
         'w-full rounded-lg border border-[var(--divider)] bg-[var(--field)] px-3 py-2.5 text-sm text-[var(--fg)] outline-none placeholder:text-[var(--fg-subtle)] focus:border-primary-500';
@@ -45,6 +55,18 @@
         'data-1p-ignore': '',
         'data-form-type': 'other'
     };
+
+    /** 自动备份周期选项（分钟） */
+    const AUTO_INTERVAL_OPTIONS = [
+        { value: '15', label: '每 15 分钟' },
+        { value: '30', label: '每 30 分钟' },
+        { value: '60', label: '每 1 小时' },
+        { value: '180', label: '每 3 小时' },
+        { value: '1440', label: '每 1 天' }
+    ];
+
+    /** 自动备份保留份数选项（份） */
+    const AUTO_KEEP_OPTIONS = ['3', '7', '15', '30'];
 
     /** ———— 连接配置 ———— */
     let token = $state('');
@@ -92,6 +114,41 @@
     let deleting = $state(false);
     let deleteError = $state('');
 
+    /** ———— 自动同步与备份（Phase 1 仅自动备份） ———— */
+    let autoConfigOpen = $state(false);
+    let autoPassphrase = $state('');
+    let autoConfirm = $state('');
+    let autoShowPassphrase = $state(false);
+    let autoSavePassphrase = $state(true);
+    let autoIntervalValue = $state('30');
+    let autoKeepCountValue = $state('7');
+    let autoConfigError = $state('');
+    let autoEnabling = $state(false);
+    let autoRunning = $state(false);
+    let autoDisabling = $state(false);
+    let autoClearing = $state(false);
+    let autoActionError = $state('');
+    let autoUnlockValue = $state('');
+    let autoUnlockShow = $state(false);
+    let autoUnlockError = $state('');
+    let autoUnlocking = $state(false);
+
+    // 仅在 store 中的值真正变化时同步本地镜像，避免覆盖用户刚选中、尚未保存的值
+    let syncedAutoInterval = -1;
+    let syncedAutoKeepCount = -1;
+
+    $effect(() => {
+        const state = $baiduAutoState;
+        if (state.intervalMinutes !== syncedAutoInterval) {
+            syncedAutoInterval = state.intervalMinutes;
+            autoIntervalValue = String(state.intervalMinutes);
+        }
+        if (state.keepCount !== syncedAutoKeepCount) {
+            syncedAutoKeepCount = state.keepCount;
+            autoKeepCountValue = String(state.keepCount);
+        }
+    });
+
     // 设置异步载入 / 保存后同步镜像
     $effect(() => {
         const s = $settings;
@@ -118,6 +175,27 @@
               }
             : { notes: 0, folders: 0 }
     );
+
+    /** 自动备份保留份数选项：当前值不在预设内时补充当前值，避免选项与真实配置不一致 */
+    let autoKeepOptions = $derived.by(() => {
+        const list = [...AUTO_KEEP_OPTIONS];
+        const current = String(autoKeepCountValue || '7');
+        if (!list.includes(current)) list.push(current);
+        return list.sort((a, b) => Number(a) - Number(b));
+    });
+
+    /** 上次自动备份时间 */
+    let lastBackupLabel = $derived(
+        $baiduAutoState.lastBackupAt ? formatTimestamp($baiduAutoState.lastBackupAt) : '尚未备份'
+    );
+
+    /** 下次计划运行时间 */
+    let nextRunLabel = $derived(
+        $baiduAutoState.nextRunAt ? formatTimestamp($baiduAutoState.nextRunAt) : '—'
+    );
+
+    /** 自动运行阶段文案 */
+    let autoProgressLabel = $derived($baiduAutoState.progressText || '正在备份…');
 
     /** 上传按钮文案（含分片进度） */
     let uploadButtonText = $derived.by(() => {
@@ -155,6 +233,180 @@
     function formatMtime(seconds) {
         const value = Number(seconds) || 0;
         return value > 0 ? new Date(value * 1000).toLocaleString() : '—';
+    }
+
+    /** 毫秒级时间戳 → 本地时间 */
+    function formatTimestamp(ms) {
+        const value = Number(ms) || 0;
+        return value > 0 ? new Date(value).toLocaleString() : '';
+    }
+
+    /** 打开自动备份配置弹窗（每次打开都重置输入与选项镜像） */
+    function openAutoConfig() {
+        autoConfigError = '';
+        autoPassphrase = '';
+        autoConfirm = '';
+        autoShowPassphrase = false;
+        autoSavePassphrase = true;
+        autoIntervalValue = String($baiduAutoState.intervalMinutes || 30);
+        autoKeepCountValue = String($baiduAutoState.keepCount || 7);
+        autoConfigOpen = true;
+    }
+
+    /** 校验本次输入的口令（已保存口令时不要求重复输入） */
+    function validateAutoPassphrase() {
+        if ($baiduAutoState.storedPassphrase) return '';
+        try {
+            assertPassword(autoPassphrase);
+        } catch (e) {
+            return e?.message || `自动同步口令至少需要 ${MIN_PASSWORD_LENGTH} 位。`;
+        }
+        if (autoPassphrase !== autoConfirm) {
+            return '两次输入的自动同步口令不一致。';
+        }
+        return '';
+    }
+
+    /** 启用自动备份 */
+    async function confirmEnableAuto() {
+        autoConfigError = validateAutoPassphrase();
+        if (autoConfigError) return;
+
+        const useStored = $baiduAutoState.storedPassphrase;
+        autoEnabling = true;
+        try {
+            await enableAutoSync({
+                passphrase: useStored ? undefined : autoPassphrase,
+                savePassphrase: autoSavePassphrase,
+                backupEnabled: true,
+                intervalMinutes: Number(autoIntervalValue),
+                keepCount: Number(autoKeepCountValue)
+            });
+            autoConfigOpen = false;
+            autoPassphrase = '';
+            autoConfirm = '';
+            autoConfigError = '';
+            autoActionError = '';
+            autoUnlockError = '';
+            error = '';
+            message = '自动备份已启用。';
+        } catch (e) {
+            autoConfigError = e?.message || '启用自动备份失败，请稍后重试。';
+        } finally {
+            autoEnabling = false;
+        }
+    }
+
+    /** 解锁自动同步（仅本次会话） */
+    async function confirmUnlockAuto() {
+        autoUnlockError = '';
+        if (!autoUnlockValue) {
+            autoUnlockError = '请输入自动同步口令。';
+            return;
+        }
+        autoUnlocking = true;
+        try {
+            await unlockAutoSync(autoUnlockValue);
+            autoUnlockValue = '';
+            autoUnlockShow = false;
+            autoActionError = '';
+        } catch (e) {
+            autoUnlockError = e?.message || '自动同步口令错误。';
+        } finally {
+            autoUnlocking = false;
+        }
+    }
+
+    /** 立即执行一次自动备份（强制上传） */
+    async function runAutoNow() {
+        autoActionError = '';
+        autoRunning = true;
+        try {
+            await runAutoSyncNow();
+            error = '';
+            message = '自动备份已完成。';
+            await refreshArchives({ silent: true });
+        } catch (e) {
+            autoActionError = e?.message || '自动备份失败，请稍后重试。';
+        } finally {
+            autoRunning = false;
+        }
+    }
+
+    /** 暂停自动备份（二次确认；保留已保存口令与配置） */
+    async function pauseAuto() {
+        if (
+            typeof window !== 'undefined' &&
+            !window.confirm('暂停后将停止自动备份，已保存的口令与配置会保留。确定暂停吗？')
+        ) {
+            return;
+        }
+        autoActionError = '';
+        autoDisabling = true;
+        try {
+            await disableAutoSync();
+            error = '';
+            message = '自动备份已暂停。';
+        } catch (e) {
+            autoActionError = e?.message || '暂停自动备份失败。';
+        } finally {
+            autoDisabling = false;
+        }
+    }
+
+    /** 清除本机加密保存的自动同步口令（二次确认） */
+    async function clearSavedAutoPassphrase() {
+        if (
+            typeof window !== 'undefined' &&
+            !window.confirm('清除后，下次打开应用需要重新输入自动同步口令。确定清除吗？')
+        ) {
+            return;
+        }
+        autoActionError = '';
+        autoClearing = true;
+        try {
+            await clearStoredAutoPassphrase();
+            error = '';
+            message = '已清除本机保存的自动同步口令。';
+        } catch (e) {
+            autoActionError = e?.message || '清除已保存口令失败。';
+        } finally {
+            autoClearing = false;
+        }
+    }
+
+    /** 修改自动备份周期 */
+    async function onAutoIntervalChange(event) {
+        const next = Number(event?.currentTarget?.value);
+        autoIntervalValue = String(Number.isFinite(next) && next > 0 ? next : 30);
+        autoActionError = '';
+        try {
+            await saveAutoOptions({
+                intervalMinutes: Number(autoIntervalValue),
+                keepCount: Number(autoKeepCountValue)
+            });
+            error = '';
+            message = '自动备份周期已更新。';
+        } catch (e) {
+            autoActionError = e?.message || '保存自动备份设置失败。';
+        }
+    }
+
+    /** 修改自动备份保留份数 */
+    async function onAutoKeepCountChange(event) {
+        const next = Number(event?.currentTarget?.value);
+        autoKeepCountValue = String(Number.isFinite(next) && next > 0 ? next : 7);
+        autoActionError = '';
+        try {
+            await saveAutoOptions({
+                intervalMinutes: Number(autoIntervalValue),
+                keepCount: Number(autoKeepCountValue)
+            });
+            error = '';
+            message = '自动备份保留份数已更新。';
+        } catch (e) {
+            autoActionError = e?.message || '保存自动备份设置失败。';
+        }
     }
 
     /** 连接状态文案 */
@@ -557,6 +809,222 @@
         <P size="sm" class="text-[var(--fg-muted)]">{message}</P>
     {/if}
 
+    <!-- 自动同步与备份（Phase 1 仅自动备份，不显示双向同步开关） -->
+    <div class="flex flex-col gap-3 border-t border-[var(--divider)] pt-4">
+        <div class="flex flex-col gap-1">
+            <Label class="text-[15px] text-[var(--fg)]">自动同步与备份</Label>
+            {#if !$baiduAutoState.configured}
+                <P size="sm" class="text-[var(--fg-muted)]">
+                    请先完成上方百度网盘连接（验证并保存），再启用自动备份。
+                </P>
+            {:else if !$baiduAutoState.enabled}
+                <P size="sm" class="text-[var(--fg-muted)]">
+                    笔记会在离开设备前加密，并自动上传到百度网盘。
+                </P>
+            {/if}
+        </div>
+
+        {#if !$baiduAutoState.configured}
+            <div class="flex flex-col gap-2 sm:flex-row">
+                <button
+                    type="button"
+                    class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    disabled
+                >
+                    <ha-icon name="lock" collection="lucide" size="18"></ha-icon>
+                    <span>启用自动备份…</span>
+                </button>
+            </div>
+            <P size="sm" class="text-[var(--fg-subtle)]">
+                完成连接并验证保存后，自动备份按钮才会可用。
+            </P>
+        {:else if !$baiduAutoState.enabled}
+            <div class="flex flex-col gap-2 sm:flex-row">
+                <button
+                    type="button"
+                    class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    onclick={openAutoConfig}
+                    disabled={$baiduAutoState.busy}
+                >
+                    <ha-icon name="rotate-ccw" collection="lucide" size="18"></ha-icon>
+                    <span>启用自动备份…</span>
+                </button>
+            </div>
+            {#if autoActionError}
+                <P size="sm" class="text-red-500" role="alert">{autoActionError}</P>
+            {/if}
+        {:else}
+            <div class="flex flex-col gap-3 rounded-lg border border-[var(--divider)] p-3">
+                <div class="flex items-center gap-2">
+                    <ha-icon
+                        name="rotate-ccw"
+                        collection="lucide"
+                        size="18"
+                        class="shrink-0 text-primary-500"
+                    ></ha-icon>
+                    <span class="text-sm font-medium text-[var(--fg)]">自动备份已启用</span>
+                </div>
+
+                <dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                    <div class="flex flex-col gap-0.5">
+                        <dt class="text-xs text-[var(--fg-subtle)]">上次备份</dt>
+                        <dd class="text-[var(--fg-muted)]">{lastBackupLabel}</dd>
+                    </div>
+                    <div class="flex flex-col gap-0.5">
+                        <dt class="text-xs text-[var(--fg-subtle)]">下次计划</dt>
+                        <dd class="text-[var(--fg-muted)]">{nextRunLabel}</dd>
+                    </div>
+                    <div class="flex flex-col gap-0.5">
+                        <dt class="text-xs text-[var(--fg-subtle)]">保留份数</dt>
+                        <dd class="text-[var(--fg-muted)]">{$baiduAutoState.keepCount} 份</dd>
+                    </div>
+                    <div class="flex flex-col gap-0.5">
+                        <dt class="text-xs text-[var(--fg-subtle)]">口令保存</dt>
+                        <dd class="text-[var(--fg-muted)]">
+                            {$baiduAutoState.storedPassphrase ? '已在本机加密保存' : '仅本次会话'}
+                        </dd>
+                    </div>
+                </dl>
+
+                {#if $baiduAutoState.authExpired}
+                    <P size="sm" class="text-red-500" role="alert">
+                        token 已失效，请重新获取并粘贴到上方，点击“验证并保存”后再启用/继续自动备份。
+                    </P>
+                {/if}
+
+                {#if $baiduAutoState.lastError}
+                    <P size="sm" class="text-red-500" role="alert">
+                        {$baiduAutoState.lastError}
+                    </P>
+                {/if}
+
+                {#if !$baiduAutoState.unlocked}
+                    <div class="flex flex-col gap-1.5 rounded-lg bg-[var(--field)] p-3">
+                        <Label for="auto-unlock-passphrase" class="text-[15px] text-[var(--fg)]">
+                            自动同步口令
+                        </Label>
+                        <div class="flex flex-col gap-2 sm:flex-row">
+                            <div class="relative min-w-0 flex-1">
+                                <input
+                                    id="auto-unlock-passphrase"
+                                    type={secretInputType(autoUnlockShow)}
+                                    style={maskStyle(autoUnlockShow)}
+                                    bind:value={autoUnlockValue}
+                                    class="{INPUT_CLASS} pe-10"
+                                    placeholder="输入口令以解锁自动同步"
+                                    {...SECRET_AUTOFILL}
+                                />
+                                <button
+                                    type="button"
+                                    class="absolute inset-y-0 end-0 grid w-10 place-items-center text-[var(--fg-subtle)] hover:text-[var(--fg)]"
+                                    aria-label={autoUnlockShow ? '隐藏口令' : '显示口令'}
+                                    onclick={() => (autoUnlockShow = !autoUnlockShow)}
+                                >
+                                    <ha-icon
+                                        name={autoUnlockShow ? 'eye-off' : 'eye'}
+                                        collection="lucide"
+                                        size="18"
+                                    ></ha-icon>
+                                </button>
+                            </div>
+                            <button
+                                type="button"
+                                class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--divider)] px-5 py-2.5 text-sm text-[var(--fg)] transition-colors hover:bg-[var(--row-active)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:flex-none"
+                                onclick={confirmUnlockAuto}
+                                disabled={autoUnlocking}
+                            >
+                                <ha-icon name="lock" collection="lucide" size="18"></ha-icon>
+                                <span>{autoUnlocking ? '解锁中…' : '解锁'}</span>
+                            </button>
+                        </div>
+                        {#if autoUnlockError}
+                            <P size="sm" class="text-red-500" role="alert">{autoUnlockError}</P>
+                        {/if}
+                    </div>
+                {/if}
+
+                {#if $baiduAutoState.busy}
+                    <P size="sm" class="text-[var(--fg-muted)]">{autoProgressLabel}</P>
+                {/if}
+
+                {#if autoActionError}
+                    <P size="sm" class="text-red-500" role="alert">{autoActionError}</P>
+                {/if}
+
+                <div class="flex flex-col gap-2 sm:flex-row">
+                    <button
+                        type="button"
+                        class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                        onclick={runAutoNow}
+                        disabled={$baiduAutoState.busy || autoRunning}
+                    >
+                        <ha-icon name="upload" collection="lucide" size="18"></ha-icon>
+                        <span>
+                            {autoRunning || $baiduAutoState.busy ? '备份中…' : '立即备份'}
+                        </span>
+                    </button>
+                    <button
+                        type="button"
+                        class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--divider)] px-5 py-2.5 text-sm text-[var(--fg)] transition-colors hover:bg-[var(--row-active)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                        onclick={pauseAuto}
+                        disabled={$baiduAutoState.busy || autoDisabling}
+                    >
+                        <ha-icon name="square" collection="lucide" size="18"></ha-icon>
+                        <span>{autoDisabling ? '暂停中…' : '暂停'}</span>
+                    </button>
+                    <button
+                        type="button"
+                        class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--divider)] px-5 py-2.5 text-sm text-[var(--fg)] transition-colors hover:bg-[var(--row-active)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                        onclick={clearSavedAutoPassphrase}
+                        disabled={$baiduAutoState.busy ||
+                            autoClearing ||
+                            !$baiduAutoState.storedPassphrase}
+                    >
+                        <ha-icon name="lock" collection="lucide" size="18"></ha-icon>
+                        <span>{autoClearing ? '清除中…' : '清除已保存口令'}</span>
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div class="flex flex-col gap-1.5">
+                        <Label for="auto-interval" class="text-[15px] text-[var(--fg)]">
+                            自动备份周期
+                        </Label>
+                        <Select
+                            id="auto-interval"
+                            value={autoIntervalValue}
+                            onchange={onAutoIntervalChange}
+                            size="sm"
+                            aria-label="自动备份周期"
+                            disabled={$baiduAutoState.busy}
+                        >
+                            {#each AUTO_INTERVAL_OPTIONS as option (option.value)}
+                                <option value={option.value}>{option.label}</option>
+                            {/each}
+                        </Select>
+                    </div>
+                    <div class="flex flex-col gap-1.5">
+                        <Label for="auto-keep-count" class="text-[15px] text-[var(--fg)]">
+                            保留份数
+                        </Label>
+                        <Select
+                            id="auto-keep-count"
+                            value={autoKeepCountValue}
+                            onchange={onAutoKeepCountChange}
+                            size="sm"
+                            aria-label="自动备份保留份数"
+                            disabled={$baiduAutoState.busy}
+                        >
+                            {#each autoKeepOptions as option (option)}
+                                <option value={option}>保留 {option} 份</option>
+                            {/each}
+                        </Select>
+                    </div>
+                </div>
+            </div>
+        {/if}
+    </div>
+
     <!-- 云端存档列表 -->
     <div class="flex flex-col gap-3 border-t border-[var(--divider)] pt-4">
         <div class="flex items-center justify-between gap-3">
@@ -883,6 +1351,144 @@
                 disabled={deleting}
             >
                 {deleting ? '删除中…' : '删除'}
+            </button>
+        </div>
+    {/snippet}
+</Modal>
+
+<!-- 自动备份：启用配置 -->
+<Modal
+    bind:open={autoConfigOpen}
+    title="启用自动备份"
+    size="none"
+    class="max-w-[calc(100vw-2rem)] sm:max-w-sm max-md:mt-4 max-md:mb-auto"
+>
+    <div class="flex flex-col gap-4">
+        <P size="sm" class="text-[var(--fg-muted)]">
+            {#if $baiduAutoState.storedPassphrase}
+                将使用本机已加密保存的自动同步口令。
+            {:else}
+                请设置自动同步口令，至少 {MIN_PASSWORD_LENGTH} 位；忘记后自动备份将无法解密恢复。
+            {/if}
+        </P>
+
+        {#if !$baiduAutoState.storedPassphrase}
+            <div class="flex flex-col gap-1.5">
+                <Label for="auto-passphrase" class="text-[15px] text-[var(--fg)]">
+                    自动同步口令
+                </Label>
+                <div class="relative">
+                    <input
+                        id="auto-passphrase"
+                        type={secretInputType(autoShowPassphrase)}
+                        style={maskStyle(autoShowPassphrase)}
+                        bind:value={autoPassphrase}
+                        class="{INPUT_CLASS} pe-10"
+                        placeholder="至少 {MIN_PASSWORD_LENGTH} 位"
+                        {...SECRET_AUTOFILL}
+                    />
+                    <button
+                        type="button"
+                        class="absolute inset-y-0 end-0 grid w-10 place-items-center text-[var(--fg-subtle)] hover:text-[var(--fg)]"
+                        aria-label={autoShowPassphrase ? '隐藏口令' : '显示口令'}
+                        onclick={() => (autoShowPassphrase = !autoShowPassphrase)}
+                    >
+                        <ha-icon
+                            name={autoShowPassphrase ? 'eye-off' : 'eye'}
+                            collection="lucide"
+                            size="18"
+                        ></ha-icon>
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex flex-col gap-1.5">
+                <Label for="auto-passphrase-confirm" class="text-[15px] text-[var(--fg)]">
+                    确认口令
+                </Label>
+                <input
+                    id="auto-passphrase-confirm"
+                    type={secretInputType(autoShowPassphrase)}
+                    style={maskStyle(autoShowPassphrase)}
+                    bind:value={autoConfirm}
+                    class={INPUT_CLASS}
+                    placeholder="再次输入口令"
+                    {...SECRET_AUTOFILL}
+                />
+            </div>
+        {/if}
+
+        <div class="flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-3">
+                <span class="text-[15px] text-[var(--fg)]">
+                    在本机加密保存口令（用于无人值守自动备份）
+                </span>
+                <Switch
+                    checked={autoSavePassphrase}
+                    ariaLabel="在本机加密保存口令"
+                    onchange={(checked) => (autoSavePassphrase = checked)}
+                />
+            </div>
+            {#if !autoSavePassphrase}
+                <P size="sm" class="text-[var(--fg-subtle)]">
+                    关闭后，每次打开应用需要手动解锁自动同步。
+                </P>
+            {/if}
+        </div>
+
+        <div class="flex flex-col gap-1.5">
+            <Label for="auto-interval-config" class="text-[15px] text-[var(--fg)]">
+                自动备份周期
+            </Label>
+            <Select
+                id="auto-interval-config"
+                value={autoIntervalValue}
+                onchange={onAutoIntervalChange}
+                size="sm"
+                aria-label="自动备份周期"
+                disabled={autoEnabling}
+            >
+                {#each AUTO_INTERVAL_OPTIONS as option (option.value)}
+                    <option value={option.value}>{option.label}</option>
+                {/each}
+            </Select>
+        </div>
+
+        <div class="flex flex-col gap-1.5">
+            <Label for="auto-keep-count-config" class="text-[15px] text-[var(--fg)]">
+                保留份数
+            </Label>
+            <Select
+                id="auto-keep-count-config"
+                value={autoKeepCountValue}
+                onchange={onAutoKeepCountChange}
+                size="sm"
+                aria-label="自动备份保留份数"
+                disabled={autoEnabling}
+            >
+                {#each autoKeepOptions as option (option)}
+                    <option value={option}>保留 {option} 份</option>
+                {/each}
+            </Select>
+        </div>
+
+        {#if autoConfigError}
+            <P size="sm" class="text-red-500" role="alert">{autoConfigError}</P>
+        {/if}
+    </div>
+
+    {#snippet footer()}
+        <div class="flex w-full justify-end gap-2">
+            <Button color="light" onclick={() => (autoConfigOpen = false)} disabled={autoEnabling}>
+                取消
+            </Button>
+            <button
+                type="button"
+                class="inline-flex items-center justify-center gap-2 rounded-lg bg-primary-500 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
+                onclick={confirmEnableAuto}
+                disabled={autoEnabling}
+            >
+                {autoEnabling ? '启用中…' : '启用'}
             </button>
         </div>
     {/snippet}

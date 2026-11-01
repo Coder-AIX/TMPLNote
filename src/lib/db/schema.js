@@ -10,8 +10,12 @@
 /** 数据库名称 */
 export const DB_NAME = 'tmplnote';
 
-/** 数据库版本（结构变更时 +1；v2：新增 folders 仓库与 notes.by-folder 索引） */
-export const DB_VERSION = 2;
+/**
+ * 数据库版本（结构变更时 +1）
+ * v2：新增 folders 仓库与 notes.by-folder 索引
+ * v3：新增 secrets 仓库（自动同步口令的设备级加密存储）
+ */
+export const DB_VERSION = 3;
 
 /**
  * 根级哨兵：表示「根文件夹的父级」与「未分类笔记的所属」。
@@ -52,6 +56,16 @@ export const STORES = {
     },
     /** 应用设置（键值对，key 为主键） */
     settings: {
+        keyPath: 'key',
+        autoIncrement: false,
+        indexes: []
+    },
+    /**
+     * 自动同步口令的设备级加密存储（key 为主键，如 deviceKey / autoPassphrase）。
+     * 仅保存本机加密所需数据（设备密钥、口令密文），不进入备份导出，
+     * 以免换设备后因无法解密而产生误导。结构变更同样遵循「只增不改」。
+     */
+    secrets: {
         keyPath: 'key',
         autoIncrement: false,
         indexes: []

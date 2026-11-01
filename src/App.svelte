@@ -5,6 +5,7 @@
     import { locked, encryptionEnabled, initLock } from './lib/stores/security.js';
     import { startTrashPurge } from './lib/utils/trashScheduler.js';
     import { autoLoadCachedModel } from './lib/stores/ai.js';
+    import { initBaiduAutoSync } from './lib/stores/baiduAuto.js';
 
     let ready = $state(false);
 
@@ -14,6 +15,8 @@
         ready = true;
         // 若浏览器缓存中已有模型，自动载入（不阻塞首屏）
         autoLoadCachedModel();
+        // 初始化自动备份调度（不 await，不阻塞首屏；是否运行由 store 结合锁定态判断）
+        initBaiduAutoSync().catch(() => {});
     });
 </script>
 
